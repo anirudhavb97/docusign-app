@@ -1,0 +1,43 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model FaxDocument {
+  id                  String   @id @default(uuid())
+  faxId               String   @unique
+  receivedAt          DateTime
+  payerName           String?
+  payerFaxNumber      String
+  providerFaxNumber   String
+  status              String   @default("received")
+  bucket              String?
+  confidence          Float?
+  requiresSignature   Boolean  @default(false)
+  classificationJson  Json?
+  extractedFieldsJson Json?
+  suggestedTagsJson   Json?
+  s3Key               String
+  pageCount           Int      @default(1)
+  envelopeId          String?
+  envelopeStatus      String?
+  errorMessage        String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  events FaxEvent[]
+}
+
+model FaxEvent {
+  id         String      @id @default(uuid())
+  documentId String
+  eventType  String
+  payload    Json?
+  createdAt  DateTime    @default(now())
+
+  document   FaxDocument @relation(fields: [documentId], references: [id])
+}
