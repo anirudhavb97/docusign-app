@@ -32,7 +32,7 @@ export default function TopNav() {
       {/* Nav links */}
       <nav className="flex items-stretch flex-1 h-16">
         {navItems.map(({ href, label }) => {
-          const active = pathname === href;
+          const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
           return (
             <Link
               key={href}
