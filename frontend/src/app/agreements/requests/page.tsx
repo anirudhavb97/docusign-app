@@ -344,7 +344,7 @@ export default function RequestsPage() {
                     <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${BUCKET_COLORS[item.classification.bucket] || "bg-gray-100 text-gray-500"}`}>
                       {item.classification.label}
                     </span>
-                    <span className="text-xs text-gray-400">{item.classification.confidence}%</span>
+                    <span className="text-xs text-gray-400">Match {item.classification.confidence}%</span>
                   </div>
                 )}
               </div>
