@@ -43,13 +43,13 @@ export async function classifyDocument(ingestion: IngestionResult): Promise<Clas
   const prompt = `You are an experienced medical records specialist. Classify this healthcare fax document into exactly ONE of these 8 buckets:
 
 1. DME_ORDER — Durable Medical Equipment Order (HCPCS A/E/K codes, CMN, equipment names, "medical necessity", requires physician signature)
-2. HOME_HEALTH_ORDER — Home Health Order (skilled nursing, PT/OT/ST/HHA, "homebound", "485", visit frequency, requires physician signature)
+2. HOME_HEALTH_ORDER — Home Health Order (skilled nursing, PT/OT/ST/HHA, "homebound", "485", visit frequency, lab draw orders, Auth provider field, requires physician signature)
 3. PLAN_OF_CARE — Plan of Care (CMS-485, certification period, functional limitations, goals, prognosis, requires physician signature)
 4. PRIOR_AUTHORIZATION — Prior Authorization Request (PA/pre-auth/pre-cert, approval request, authorization number, clinical rationale, requires physician signature)
 5. MEDICAL_RECORD_REQUEST — Medical Record Request (ROI, HIPAA auth, records request, date ranges, generally NO physician signature)
-6. ATTESTATION_AUDIT — Attestation or Audit Request (RAC/OIG/ZPIC audit, ADR, "attest", documentation request, requires physician signature)
-7. SIGNATURE_REQUIRED_OTHER — Other document requiring physician signature (disability, FMLA, letter of medical necessity, misc forms)
-8. NO_SIGNATURE_REQUIRED — Informational/administrative, no physician signature needed (EOBs, remittance, notices, referral confirmations)
+6. ATTESTATION_AUDIT — Attestation or Audit Request (RAC/OIG/ZPIC audit, ADR, "attest", blank attestation forms, CMS signature attestation templates, documentation request, requires physician signature)
+7. SIGNATURE_REQUIRED_OTHER — Other document requiring physician signature (disability, FMLA, letter of medical necessity, misc forms with a blank signature line)
+8. NO_SIGNATURE_REQUIRED — Informational/administrative, no physician signature needed (EOBs, remittance, policy guides, notices, referral confirmations)
 
 Ingested document data:
 ${JSON.stringify(ingestion, null, 2)}
@@ -57,7 +57,21 @@ ${JSON.stringify(ingestion, null, 2)}
 Raw document text:
 ${rawText}
 
-Physician signature already present: ${ingestion.signatures.physician_signature_present}
+Physician signature already present (from ingestion): ${ingestion.signatures.physician_signature_present}
+
+CRITICAL CLASSIFICATION RULES — read carefully before deciding:
+
+SIGNATURE DETECTION:
+- A blank "Signature: ___________" line = NO signature present. Action = SIGNATURE_NEEDED.
+- A typed/printed provider name above a blank line = NOT a signature. Action = SIGNATURE_NEEDED.
+- Only an actual ink mark, cursive handwriting, or electronic stamp = signature present. Action = ALREADY_SIGNED.
+- If you see "Provider Signature for [Name]" followed by a blank Signature line → physician_signature_present = false → SIGNATURE_NEEDED.
+
+DOCUMENT TYPE RULES:
+- If the document contains visit orders (skilled nursing, lab draw, PT, OT) and an "Auth provider" or ordering physician field → HOME_HEALTH_ORDER → SIGNATURE_NEEDED (even if it's page 2 of 2).
+- If the document is a BLANK attestation/affidavit FORM with empty fields waiting to be filled in (like a CMS attestation template) → ATTESTATION_AUDIT → SIGNATURE_NEEDED.
+- A CMS policy document that explains signature requirements but contains a blank form to be signed → ATTESTATION_AUDIT → SIGNATURE_NEEDED.
+- Only use NO_SIGNATURE_REQUIRED for purely informational content with NO blank signature lines (e.g., EOBs, remittance advice, policy guides with no form component).
 
 Return ONLY valid JSON:
 {
@@ -71,19 +85,20 @@ Return ONLY valid JSON:
     "action": "<SIGNATURE_NEEDED|ALREADY_SIGNED|NO_SIGNATURE_REQUIRED|MANUAL_REVIEW>"
   },
   "bucket_specific_fields": {
-    <include only the fields relevant to the classified bucket as defined in the skill spec>
+    <include only the fields relevant to the classified bucket>
   },
   "secondary_classification": "<bucket ID or null>",
   "urgency": "<urgent|standard|expedited|null>",
-  "classification_reasoning": "<clear explanation of why this bucket was chosen>",
+  "classification_reasoning": "<clear explanation of why this bucket and action were chosen>",
   "confidence_notes": "<any caveats about confidence>"
 }
 
-Action rules:
-- SIGNATURE_NEEDED: requires physician signature AND none is present
-- ALREADY_SIGNED: requires physician signature AND one is already present
-- NO_SIGNATURE_REQUIRED: bucket 5 or 8 (no physician signature needed)
-- MANUAL_REVIEW: confidence < 0.65 or document too illegible`;
+Action decision logic (apply in order):
+1. If confidence < 0.65 or document is too illegible → MANUAL_REVIEW
+2. If bucket is 5 (MEDICAL_RECORD_REQUEST) or 8 (NO_SIGNATURE_REQUIRED) AND no blank signature line present → NO_SIGNATURE_REQUIRED
+3. If requires_physician_signature = true AND physician_signature_present = true (actual ink/stamp) → ALREADY_SIGNED
+4. If requires_physician_signature = true AND physician_signature_present = false (blank line or no line) → SIGNATURE_NEEDED
+5. Default → MANUAL_REVIEW`;
 
   const response = await getClient().messages.create({
     model: "claude-sonnet-4-6",

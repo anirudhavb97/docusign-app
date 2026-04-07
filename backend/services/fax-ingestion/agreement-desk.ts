@@ -12,6 +12,8 @@
  */
 import axios from "axios";
 import { randomUUID } from "crypto";
+import * as fs from "fs";
+import * as path from "path";
 import { simpleParser } from "mailparser";
 import { runFullPipeline } from "../ai-pipeline";
 import { getAccessToken } from "../docusign/jwt-auth";
@@ -19,6 +21,44 @@ import { getAccessToken } from "../docusign/jwt-auth";
 const DS_BASE_URL = () => process.env.DOCUSIGN_BASE_URL || "https://demo.docusign.net/restapi";
 const DS_ACCOUNT_ID = () => process.env.DOCUSIGN_ACCOUNT_ID!;
 const INBOX_FOLDER_ID = process.env.AGREEMENT_DESK_INBOX_FOLDER_ID || "d612e145-619c-4525-87f1-0d14a5300eb2";
+
+// ── Persistence (JSON file) ───────────────────────────────────────────────────
+// Items survive server restarts (but not Railway redeploys, which wipe the FS).
+// _pdfBase64 is excluded from the persisted file to keep it small.
+
+const PERSIST_PATH = process.env.INBOX_PERSIST_PATH
+  || path.join(process.cwd(), "data", "inbox.json");
+
+function persistItems() {
+  try {
+    const dir = path.dirname(PERSIST_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const rows = Array.from(inboxItems.values()).map(item => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { _pdfBase64, pipelineResult, ...rest } = item;
+      return rest;
+    });
+    fs.writeFileSync(PERSIST_PATH, JSON.stringify(rows, null, 2), "utf8");
+  } catch (e: any) {
+    console.warn("[agreement-desk] Could not persist inbox:", e.message);
+  }
+}
+
+function loadPersistedItems() {
+  try {
+    if (!fs.existsSync(PERSIST_PATH)) return;
+    const raw = fs.readFileSync(PERSIST_PATH, "utf8");
+    const rows: InboxItem[] = JSON.parse(raw);
+    for (const item of rows) {
+      // Don't restore items stuck in "processing" — they'll never finish
+      if (item.status === "processing") item.status = "error" as any;
+      inboxItems.set(item.id, item);
+    }
+    console.log(`[agreement-desk] Loaded ${rows.length} persisted inbox item(s)`);
+  } catch (e: any) {
+    console.warn("[agreement-desk] Could not load persisted inbox:", e.message);
+  }
+}
 
 // ── In-memory store ──────────────────────────────────────────────────────────
 
@@ -45,6 +85,9 @@ export interface InboxItem {
 
 const inboxItems = new Map<string, InboxItem>();
 let pollingInterval: NodeJS.Timeout | null = null;
+
+// Load any previously persisted items on module load
+loadPersistedItems();
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -156,6 +199,7 @@ async function processEnvelope(envelopeId: string, emailSubject: string, receive
     receivedAt,
     status: "processing",
   });
+  persistItems();
 
   try {
     const downloaded = await downloadDocumentAsBase64(envelopeId);
@@ -193,6 +237,7 @@ async function processEnvelope(envelopeId: string, emailSubject: string, receive
       physicianEmail: physicianEmail ?? undefined,
       pipelineResult: pipeline,
     });
+    persistItems();
 
     console.log(`[agreement-desk] ✓ ${downloaded.filename} → ${bucket} (${Math.round((cls?.confidence || 0) * 100)}%) needs_sig=${needsSignature}`);
   } catch (err: any) {
@@ -203,6 +248,7 @@ async function processEnvelope(envelopeId: string, emailSubject: string, receive
       status: "error",
       error: err.message,
     });
+    persistItems();
   }
 }
 
@@ -215,6 +261,7 @@ export async function processUploadedFile(pdfBase64: string, filename: string): 
 
   const item: InboxItem = { id, filename, receivedAt, status: "processing", source: "upload", _pdfBase64: pdfBase64 };
   inboxItems.set(id, item);
+  persistItems();
 
   // Fire-and-forget pipeline
   (async () => {
@@ -227,8 +274,10 @@ export async function processUploadedFile(pdfBase64: string, filename: string): 
       const needsSignature = cls?.action === "SIGNATURE_NEEDED";
       const bucket = cls?.bucket || "UNKNOWN";
 
+      // Re-fetch item from map (in case it was updated externally) but keep _pdfBase64
+      const current = inboxItems.get(id) || item;
       inboxItems.set(id, {
-        ...item,
+        ...current,
         status: "classified",
         classification: {
           bucket,
@@ -241,10 +290,12 @@ export async function processUploadedFile(pdfBase64: string, filename: string): 
         physicianEmail,
         pipelineResult: pipeline,
       });
+      persistItems();
       console.log(`[agreement-desk] ✓ Upload ${filename} → ${bucket} needs_sig=${needsSignature}`);
     } catch (err: any) {
       console.error(`[agreement-desk] Upload pipeline error for ${filename}:`, err.message);
-      inboxItems.set(id, { ...item, status: "error", error: err.message });
+      inboxItems.set(id, { ...(inboxItems.get(id) || item), status: "error", error: err.message });
+      persistItems();
     }
   })();
 
@@ -291,7 +342,9 @@ export function getInboxItems(): InboxItem[] {
 
 /** Delete an item from the inbox */
 export function deleteInboxItem(id: string): boolean {
-  return inboxItems.delete(id);
+  const deleted = inboxItems.delete(id);
+  if (deleted) persistItems();
+  return deleted;
 }
 
 /** Check if any envelope_created items have been signed in DocuSign */
@@ -312,6 +365,7 @@ export async function checkSignedEnvelopes(): Promise<void> {
       const dsStatus = res.data?.status;
       if (dsStatus === "completed") {
         inboxItems.set(item.id, { ...item, status: "signed" });
+        persistItems();
         console.log(`[agreement-desk] ✓ Envelope ${item.draftEnvelopeId} signed — updating status`);
       }
     } catch {
@@ -397,6 +451,7 @@ export async function createDraftEnvelope(itemId: string): Promise<{ draftEnvelo
 
   // Update item status
   inboxItems.set(itemId, { ...item, status: "envelope_created", draftEnvelopeId });
+  persistItems();
 
   // Build the DocuSign web app URL to view the draft
   const viewUrl = `https://apps-d.docusign.com/send/prepare/${draftEnvelopeId}`;

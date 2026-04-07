@@ -82,8 +82,13 @@ Analyze this document carefully. Faxes are often low resolution with handwritten
 
 Extract ALL of the following fields with high accuracy. For handwritten dates, normalize to YYYY-MM-DD.
 Distinguish NPI (exactly 10 digits) from phone numbers and DEA numbers (2 letters + 7 digits).
-Detect whether handwritten signatures are present (cursive flourishes, personal marks — NOT typed names).
 Note fax header transmission data separately from document content.
+
+CRITICAL RULE for physician_signature_present:
+- Set to TRUE only if there is an ACTUAL handwritten mark, cursive pen stroke, or electronic signature stamp ON the signature line.
+- A BLANK signature line (empty underline, blank box, "Signature:___________") means NO signature is present → set to FALSE.
+- A typed name like "Jeremy Ross, MD" printed above a blank line is the LABEL for who should sign, NOT a signature → set to FALSE.
+- Only an ink mark, cursive flourish, or stamped signature = TRUE.
 
 Return ONLY valid JSON matching this exact structure:
 {
