@@ -35,6 +35,37 @@ const BUCKET_COLORS: Record<string, string> = {
   NO_SIGNATURE_REQUIRED:    "bg-gray-100 text-gray-500",
 };
 
+function getNoSigTooltip(cls: InboxItem["classification"]): string {
+  if (!cls) return "No signature required";
+
+  // Already has a handwritten/physical signature on the document
+  if (cls.action === "ALREADY_SIGNED") {
+    return "This document already has a physical signature — no DocuSign needed";
+  }
+
+  // Map bucket to human-readable reason
+  switch (cls.bucket) {
+    case "MEDICAL_RECORD_REQUEST":
+      return "Medical record requests are informational — no physician signature required";
+    case "ATTESTATION_AUDIT":
+      return "Audit and attestation documents don't require a new physician signature at this stage";
+    case "NO_SIGNATURE_REQUIRED":
+      // Try to give a more specific reason from the label
+      if (cls.label?.toLowerCase().includes("lab")) {
+        return "This is a lab report — results don't require a doctor's signature";
+      }
+      return "This is a non-clinical or informational document and doesn't need a physician signature";
+    case "DME_ORDER":
+    case "HOME_HEALTH_ORDER":
+    case "PLAN_OF_CARE":
+    case "PRIOR_AUTHORIZATION":
+      // These normally need a sig but the AI determined it doesn't in this case
+      return "The AI determined this document is already complete and doesn't require an additional signature";
+    default:
+      return "No physician signature is required for this document";
+  }
+}
+
 function formatDate(iso: string) {
   try {
     return new Date(iso).toLocaleString("en-US", {
@@ -324,9 +355,16 @@ export default function RequestsPage() {
                       <Clock size={12} /> Required
                     </span>
                   ) : (
-                    <span className="flex items-center gap-1 text-xs font-medium text-green-600">
-                      <CheckCircle size={12} /> Not needed
-                    </span>
+                    <div className="relative group inline-flex">
+                      <span className="flex items-center gap-1 text-xs font-medium text-green-600 cursor-help">
+                        <CheckCircle size={12} /> Not needed
+                      </span>
+                      {/* Tooltip */}
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-56 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 text-center leading-relaxed">
+                        {getNoSigTooltip(item.classification)}
+                        <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900" />
+                      </div>
+                    </div>
                   )
                 )}
               </div>
