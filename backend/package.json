@@ -3,16 +3,13 @@
   "version": "1.0.0",
   "description": "",
   "main": "dist/lib/index.js",
-  "directories": {
-    "lib": "lib"
+  "engines": {
+    "node": ">=20.0.0"
   },
   "scripts": {
     "dev": "ts-node lib/index.ts",
     "build": "tsc",
-    "start": "node dist/lib/index.js",
-    "db:generate": "prisma generate",
-    "db:push": "prisma db push",
-    "db:migrate": "prisma migrate dev"
+    "start": "node dist/lib/index.js"
   },
   "keywords": [],
   "author": "",
@@ -20,24 +17,15 @@
   "type": "commonjs",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",
-    "@prisma/client": "^7.6.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.5.2",
-    "aws-sdk": "^2.1693.0",
     "axios": "^1.14.0",
-    "bullmq": "^5.73.0",
     "cors": "^2.8.6",
-    "docusign-esign": "^8.7.0",
     "dotenv": "^17.4.0",
     "express": "^5.2.1",
-    "imapflow": "^1.2.18",
-    "ioredis": "^5.10.1",
     "mailparser": "^3.9.6",
     "multer": "^2.1.1",
-    "nodemailer": "^8.0.4",
-    "pdf-parse": "^2.4.5",
-    "prisma": "^7.6.0",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.2",
     "uuid": "^13.0.0",
