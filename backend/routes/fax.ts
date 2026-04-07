@@ -15,6 +15,7 @@ import {
   getInboxItems,
   createDraftEnvelope,
   runPoll,
+  processUploadedFile,
 } from "../services/fax-ingestion/agreement-desk";
 
 export const faxRouter = Router();
@@ -58,6 +59,28 @@ faxRouter.post("/create-envelope/:id", async (req: Request, res: Response) => {
     console.error("[fax/create-envelope] Error:", err.message);
     if (err.response) console.error("DS response:", err.response.status, JSON.stringify(err.response.data));
     res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/fax/upload
+ * Upload a PDF directly → runs AI pipeline → adds to inbox table.
+ */
+faxRouter.post("/upload", upload.single("document"), async (req: Request, res: Response) => {
+  try {
+    const file = (req as any).file;
+    if (!file) return res.status(400).json({ error: "No file attached. Send PDF as multipart field 'document'." });
+    if (!file.mimetype.includes("pdf") && !file.originalname.endsWith(".pdf")) {
+      return res.status(400).json({ error: "Only PDF files are supported." });
+    }
+    const pdfBase64 = file.buffer.toString("base64");
+    const filename = file.originalname || `upload_${Date.now()}.pdf`;
+    console.log(`[fax/upload] Received: ${filename} (${Math.round(file.size / 1024)}KB)`);
+    const item = await processUploadedFile(pdfBase64, filename);
+    return res.json({ success: true, item });
+  } catch (err: any) {
+    console.error("[fax/upload] Error:", err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
 

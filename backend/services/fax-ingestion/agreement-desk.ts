@@ -11,6 +11,7 @@
  * Results are kept in memory. The UI polls GET /api/fax/inbox-items for updates.
  */
 import axios from "axios";
+import { randomUUID } from "crypto";
 import { simpleParser } from "mailparser";
 import { runFullPipeline } from "../ai-pipeline";
 
@@ -21,10 +22,11 @@ const INBOX_FOLDER_ID = process.env.AGREEMENT_DESK_INBOX_FOLDER_ID || "d612e145-
 // ── In-memory store ──────────────────────────────────────────────────────────
 
 export interface InboxItem {
-  id: string;                 // DocuSign envelope ID from the inbox
+  id: string;                 // DocuSign envelope ID or upload_<uuid>
   filename: string;
   receivedAt: string;
   status: "processing" | "classified" | "envelope_created" | "error";
+  source?: "docusign" | "upload";
   classification?: {
     bucket: string;
     label: string;
@@ -37,6 +39,7 @@ export interface InboxItem {
   pipelineResult?: any;
   draftEnvelopeId?: string;   // set once draft is created in DocuSign
   error?: string;
+  _pdfBase64?: string;        // stored for uploaded files (no DocuSign envelope to re-download)
 }
 
 const inboxItems = new Map<string, InboxItem>();
@@ -203,6 +206,51 @@ async function processEnvelope(envelopeId: string, emailSubject: string, receive
   }
 }
 
+// ── Manual upload processing ─────────────────────────────────────────────────
+
+/** Process a manually uploaded PDF — adds to inbox and runs AI pipeline */
+export async function processUploadedFile(pdfBase64: string, filename: string): Promise<InboxItem> {
+  const id = `upload_${randomUUID()}`;
+  const receivedAt = new Date().toISOString();
+
+  const item: InboxItem = { id, filename, receivedAt, status: "processing", source: "upload", _pdfBase64: pdfBase64 };
+  inboxItems.set(id, item);
+
+  // Fire-and-forget pipeline
+  (async () => {
+    try {
+      console.log(`[agreement-desk] Running AI pipeline on uploaded file: ${filename}`);
+      const pipeline = await runFullPipeline(pdfBase64, filename);
+      const cls = pipeline.classification?.classification;
+      const physicianName = pipeline.ingestion?.provider?.ordering_physician_name ?? undefined;
+      const physicianEmail = derivePhysicianEmail(physicianName);
+      const needsSignature = cls?.action === "SIGNATURE_NEEDED";
+      const bucket = cls?.bucket || "UNKNOWN";
+
+      inboxItems.set(id, {
+        ...item,
+        status: "classified",
+        classification: {
+          bucket,
+          label: BUCKET_LABELS[bucket] || bucket,
+          confidence: Math.round((cls?.confidence || 0) * 100),
+          action: cls?.action || "MANUAL_REVIEW",
+          needsSignature,
+        },
+        physicianName,
+        physicianEmail,
+        pipelineResult: pipeline,
+      });
+      console.log(`[agreement-desk] ✓ Upload ${filename} → ${bucket} needs_sig=${needsSignature}`);
+    } catch (err: any) {
+      console.error(`[agreement-desk] Upload pipeline error for ${filename}:`, err.message);
+      inboxItems.set(id, { ...item, status: "error", error: err.message });
+    }
+  })();
+
+  return inboxItems.get(id)!;
+}
+
 // ── Polling loop ─────────────────────────────────────────────────────────────
 
 export async function runPoll() {
@@ -251,8 +299,12 @@ export async function createDraftEnvelope(itemId: string): Promise<{ draftEnvelo
   const ing = pipeline.ingestion;
 
   const accessToken = process.env.DOCUSIGN_ACCESS_TOKEN!;
-  const pdfB64 = await downloadDocumentAsBase64(itemId);
-  if (!pdfB64) throw new Error("Could not re-download PDF");
+
+  // For uploaded files use stored PDF; for DocuSign envelopes re-download
+  const pdfB64 = item._pdfBase64
+    ? { pdfBase64: item._pdfBase64, filename: item.filename }
+    : await downloadDocumentAsBase64(itemId);
+  if (!pdfB64) throw new Error("Could not retrieve PDF");
 
   // Derive signer email firstname.lastname@hospital.com
   const signerEmail = item.physicianEmail || "physician@hospital.com";
