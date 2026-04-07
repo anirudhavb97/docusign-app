@@ -203,10 +203,7 @@ faxRouter.post("/send-envelope-manual", upload.single("document"), async (req: R
     try {
       const viewRes = await axios.post(
         `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes/${envelopeId}/views/sender`,
-        {
-          returnUrl: senderReturnUrl,
-          startingScreen: "Prepare",   // show Recipients page first, then Add Fields, then Send
-        },
+        { returnUrl: senderReturnUrl },
         { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
       );
       senderViewUrl = viewRes.data.url;

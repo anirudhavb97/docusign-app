@@ -412,33 +412,46 @@ export async function createDraftEnvelope(
   // Priority 1: vision-detected coordinate tabs from pipeline's envelopePrep
   // Priority 2: anchor-string fallback tabs from pipeline's envelopePrep
   // Priority 3: hardcoded last-resort (last page, near bottom)
-  let signHereTabs: any[] = [];
-  let dateSignedTabs: any[] = [];
+  // ── Tab strategy ──────────────────────────────────────────────────────────
+  // We ALWAYS guarantee coordinate-based tabs on the last page so DocuSign
+  // never shows an empty tagging view. Anchor tabs from the vision pipeline
+  // are included AS WELL — if DocuSign finds the anchor text they appear at
+  // the exact signature line; if not, DocuSign silently skips them
+  // (anchorIgnoreIfNotPresent=true) and the coordinate tab is still there.
+  // The sender can move/delete tabs freely before hitting Send.
+  const totalPages = pipeline.ingestion?.source?.total_pages || 1;
 
+  // Coordinate fallback — always included, lands in the lower-left of the
+  // last page where signature lines almost always live in healthcare docs.
+  const coordSignTab = {
+    documentId: "1",
+    pageNumber: String(totalPages),
+    xPosition: "75",
+    yPosition: "620",
+    tabLabel: "PhysicianSignature_Coord",
+  };
+  const coordDateTab = {
+    documentId: "1",
+    pageNumber: String(totalPages),
+    xPosition: "350",
+    yPosition: "620",
+    tabLabel: "DateSigned_Coord",
+  };
+
+  // Anchor tabs from vision pipeline (empty array if vision found nothing)
   const prepTabs = envConfig?.recipients?.signers?.[0]?.tabs;
-  if (prepTabs?.signHereTabs?.length > 0) {
-    signHereTabs = prepTabs.signHereTabs.map(cleanTab);
-    dateSignedTabs = (prepTabs.dateSignedTabs || []).map(cleanTab);
-    console.log(`[agreement-desk] Using ${signHereTabs.length} signHere tab(s) from envelope prep`);
-  } else {
-    // Last-resort: place on last page near the bottom
-    const totalPages = pipeline.ingestion?.source?.total_pages || 1;
-    signHereTabs = [{
-      documentId: "1",
-      pageNumber: String(totalPages),
-      xPosition: "100",
-      yPosition: "650",
-      tabLabel: "PhysicianSignature",
-    }];
-    dateSignedTabs = [{
-      documentId: "1",
-      pageNumber: String(totalPages),
-      xPosition: "380",
-      yPosition: "650",
-      tabLabel: "DateSigned",
-    }];
-    console.log("[agreement-desk] No tabs from pipeline — using last-page fallback");
-  }
+  const anchorSignTabs: any[] = prepTabs?.signHereTabs?.length > 0
+    ? prepTabs.signHereTabs.map(cleanTab)
+    : [];
+  const anchorDateTabs: any[] = prepTabs?.dateSignedTabs?.length > 0
+    ? prepTabs.dateSignedTabs.map(cleanTab)
+    : [];
+
+  // Merge: anchor tabs first (precise), coordinate tab last (guaranteed)
+  const signHereTabs = [...anchorSignTabs, coordSignTab];
+  const dateSignedTabs = [...anchorDateTabs, coordDateTab];
+
+  console.log(`[agreement-desk] Tabs: ${anchorSignTabs.length} anchor + 1 coord signHere, ${anchorDateTabs.length} anchor + 1 coord date`);
 
   const docName = item.filename.endsWith(".pdf") ? item.filename : `${item.filename}.pdf`;
 
@@ -491,10 +504,7 @@ export async function createDraftEnvelope(
   try {
     const viewResponse = await axios.post(
       `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes/${draftEnvelopeId}/views/sender`,
-      {
-        returnUrl: senderReturnUrl,
-        startingScreen: "Prepare",   // show Recipients page first, then Add Fields, then Send
-      },
+      { returnUrl: senderReturnUrl },
       { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
     );
     senderViewUrl = viewResponse.data.url;
