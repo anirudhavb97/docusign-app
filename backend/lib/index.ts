@@ -34,10 +34,10 @@ app.get("/health", (_req, res) => res.json({
 
 app.listen(PORT, () => {
   console.log(`\nHealthcare DocuSign Backend running on port ${PORT}`);
-  // Init JWT auth (auto-refreshing token), then start inbox polling
-  initJwtAuth().then(() => {
-    startPolling(60_000);
-  });
+  // Init JWT auth only. Auto-polling is DISABLED to prevent automatic
+  // Claude API usage. Classification only runs when the user explicitly
+  // clicks "Check Now" (POST /api/fax/poll-now) or uploads a file.
+  initJwtAuth();
   console.log(`\nKey endpoints:`);
   console.log(`  POST /api/fax/process        — Process a fax PDF through full AI pipeline`);
   console.log(`  POST /api/fax/email-webhook  — Agreement Desk email webhook`);
