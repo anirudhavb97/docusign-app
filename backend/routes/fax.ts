@@ -16,6 +16,7 @@ import {
   createDraftEnvelope,
   runPoll,
   processUploadedFile,
+  deleteInboxItem,
 } from "../services/fax-ingestion/agreement-desk";
 
 export const faxRouter = Router();
@@ -60,6 +61,38 @@ faxRouter.post("/create-envelope/:id", async (req: Request, res: Response) => {
     if (err.response) console.error("DS response:", err.response.status, JSON.stringify(err.response.data));
     res.status(500).json({ error: err.message });
   }
+});
+
+/**
+ * DELETE /api/fax/inbox-items/:id
+ * Remove an item from the inbox.
+ */
+faxRouter.delete("/inbox-items/:id", (req: Request, res: Response) => {
+  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const deleted = deleteInboxItem(id);
+  res.json({ success: deleted });
+});
+
+/**
+ * POST /api/fax/send-to-ehr/:id
+ * Mock: mark document as sent to EHR system.
+ */
+faxRouter.post("/send-to-ehr/:id", (req: Request, res: Response) => {
+  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  console.log(`[fax/send-to-ehr] Sending item ${id} to EHR`);
+  // TODO: integrate with actual EHR (Epic, Cerner, etc.)
+  res.json({ success: true, message: "Document queued for EHR ingestion" });
+});
+
+/**
+ * POST /api/fax/send-to-payer/:id
+ * Mock: mark signed document as sent back to payer.
+ */
+faxRouter.post("/send-to-payer/:id", (req: Request, res: Response) => {
+  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  console.log(`[fax/send-to-payer] Sending signed item ${id} back to payer`);
+  // TODO: integrate with payer notification system
+  res.json({ success: true, message: "Signed document sent back to payer" });
 });
 
 /**

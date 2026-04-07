@@ -2,14 +2,14 @@
 import { useEffect, useRef, useState } from "react";
 import {
   RefreshCw, FileText, CheckCircle, AlertCircle, Clock,
-  ExternalLink, Send, Loader2, Upload, X,
+  ExternalLink, Send, Loader2, Upload, X, Trash2, Database, ArrowLeftRight,
 } from "lucide-react";
 
 interface InboxItem {
   id: string;
   filename: string;
   receivedAt: string;
-  status: "processing" | "classified" | "envelope_created" | "error";
+  status: "processing" | "classified" | "envelope_created" | "signed" | "error";
   source?: "docusign" | "upload";
   classification?: {
     bucket: string;
@@ -50,6 +50,8 @@ export default function RequestsPage() {
   const [creating, setCreating] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [actioning, setActioning] = useState<string | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -110,6 +112,30 @@ export default function RequestsPage() {
     setDragOver(false);
     const file = e.dataTransfer.files?.[0];
     if (file) handleUpload(file);
+  }
+
+  function handleDelete(id: string) {
+    setDeleting(id);
+    fetch(`/api/fax?path=inbox-items/${id}`, { method: "DELETE" })
+      .then(() => setItems(prev => prev.filter(i => i.id !== id)))
+      .catch(e => showToast(e.message, "error"))
+      .finally(() => setDeleting(null));
+  }
+
+  function handleSendToEhr(id: string) {
+    setActioning(id);
+    fetch(`/api/fax?path=send-to-ehr/${id}`, { method: "POST" })
+      .then(() => showToast("Document sent to EHR successfully", "success"))
+      .catch(e => showToast(e.message, "error"))
+      .finally(() => setActioning(null));
+  }
+
+  function handleSendToPayer(id: string) {
+    setActioning(id);
+    fetch(`/api/fax?path=send-to-payer/${id}`, { method: "POST" })
+      .then(() => showToast("Signed document sent back to payer", "success"))
+      .catch(e => showToast(e.message, "error"))
+      .finally(() => setActioning(null));
   }
 
   function handleCreateEnvelope(item: InboxItem) {
@@ -287,6 +313,11 @@ export default function RequestsPage() {
               {/* Signature */}
               <div>
                 {item.status === "processing" && <span className="text-xs text-gray-400">—</span>}
+                {item.status === "signed" && (
+                  <span className="flex items-center gap-1 text-xs font-semibold text-green-600">
+                    <CheckCircle size={12} /> Signed
+                  </span>
+                )}
                 {(item.status === "classified" || item.status === "envelope_created") && item.classification && (
                   item.classification.needsSignature ? (
                     <span className="flex items-center gap-1 text-xs font-semibold text-orange-600">
@@ -313,10 +344,12 @@ export default function RequestsPage() {
               </div>
 
               {/* Action */}
-              <div className="flex justify-end">
+              <div className="flex items-center justify-end gap-1.5">
                 {item.status === "processing" && (
                   <span className="text-xs text-gray-400 italic">Processing…</span>
                 )}
+
+                {/* Needs signature → Create Envelope */}
                 {item.status === "classified" && item.classification?.needsSignature && (
                   <button
                     onClick={() => handleCreateEnvelope(item)}
@@ -328,9 +361,21 @@ export default function RequestsPage() {
                       : <><Send size={12} /> Create Envelope</>}
                   </button>
                 )}
+
+                {/* No signature needed → Send to EHR */}
                 {item.status === "classified" && !item.classification?.needsSignature && (
-                  <span className="text-xs text-gray-400 italic">No action needed</span>
+                  <button
+                    onClick={() => handleSendToEhr(item.id)}
+                    disabled={actioning === item.id}
+                    className="flex items-center gap-1.5 bg-teal-600 text-white text-xs font-semibold px-3 py-2 rounded-lg hover:bg-teal-700 disabled:opacity-60 transition-colors whitespace-nowrap"
+                  >
+                    {actioning === item.id
+                      ? <><Loader2 size={12} className="animate-spin" /> Sending…</>
+                      : <><Database size={12} /> Send to EHR</>}
+                  </button>
                 )}
+
+                {/* Envelope created → View in DocuSign */}
                 {item.status === "envelope_created" && item.draftEnvelopeId && (
                   <a
                     href={`https://apps-d.docusign.com/send/prepare/${item.draftEnvelopeId}`}
@@ -341,8 +386,36 @@ export default function RequestsPage() {
                     <ExternalLink size={12} /> View in DocuSign
                   </a>
                 )}
+
+                {/* Signed → Send back to Payer */}
+                {item.status === "signed" && (
+                  <button
+                    onClick={() => handleSendToPayer(item.id)}
+                    disabled={actioning === item.id}
+                    className="flex items-center gap-1.5 bg-blue-600 text-white text-xs font-semibold px-3 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-60 transition-colors whitespace-nowrap"
+                  >
+                    {actioning === item.id
+                      ? <><Loader2 size={12} className="animate-spin" /> Sending…</>
+                      : <><ArrowLeftRight size={12} /> Send to Payer</>}
+                  </button>
+                )}
+
                 {item.status === "error" && (
                   <span className="text-xs text-red-400 italic">Failed</span>
+                )}
+
+                {/* Delete button — always shown except while processing */}
+                {item.status !== "processing" && (
+                  <button
+                    onClick={() => handleDelete(item.id)}
+                    disabled={deleting === item.id}
+                    title="Remove from inbox"
+                    className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors disabled:opacity-40"
+                  >
+                    {deleting === item.id
+                      ? <Loader2 size={13} className="animate-spin" />
+                      : <Trash2 size={13} />}
+                  </button>
                 )}
               </div>
             </div>

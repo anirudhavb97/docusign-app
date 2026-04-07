@@ -25,7 +25,7 @@ export interface InboxItem {
   id: string;                 // DocuSign envelope ID or upload_<uuid>
   filename: string;
   receivedAt: string;
-  status: "processing" | "classified" | "envelope_created" | "error";
+  status: "processing" | "classified" | "envelope_created" | "signed" | "error";
   source?: "docusign" | "upload";
   classification?: {
     bucket: string;
@@ -259,10 +259,11 @@ export async function runPoll() {
     for (const env of envelopes) {
       if (!inboxItems.has(env.envelopeId)) {
         console.log(`[agreement-desk] New fax detected: ${env.emailSubject} (${env.envelopeId})`);
-        // Fire-and-forget — don't await so poll returns quickly
         processEnvelope(env.envelopeId, env.emailSubject || "", env.createdDateTime || new Date().toISOString());
       }
     }
+    // Also check if any pending envelopes have been signed
+    await checkSignedEnvelopes();
   } catch (err: any) {
     console.error("[agreement-desk] Poll error:", err.message);
   }
@@ -286,6 +287,37 @@ export function getInboxItems(): InboxItem[] {
   return Array.from(inboxItems.values()).sort(
     (a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime()
   );
+}
+
+/** Delete an item from the inbox */
+export function deleteInboxItem(id: string): boolean {
+  return inboxItems.delete(id);
+}
+
+/** Check if any envelope_created items have been signed in DocuSign */
+export async function checkSignedEnvelopes(): Promise<void> {
+  const accessToken = process.env.DOCUSIGN_ACCESS_TOKEN;
+  if (!accessToken) return;
+
+  const pending = Array.from(inboxItems.values()).filter(
+    i => i.status === "envelope_created" && i.draftEnvelopeId
+  );
+
+  for (const item of pending) {
+    try {
+      const res = await axios.get(
+        `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes/${item.draftEnvelopeId}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const dsStatus = res.data?.status;
+      if (dsStatus === "completed") {
+        inboxItems.set(item.id, { ...item, status: "signed" });
+        console.log(`[agreement-desk] ✓ Envelope ${item.draftEnvelopeId} signed — updating status`);
+      }
+    } catch {
+      // Ignore — envelope might not be sent yet
+    }
+  }
 }
 
 /** Creates a DRAFT DocuSign envelope for an inbox item */
