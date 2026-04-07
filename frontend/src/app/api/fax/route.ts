@@ -13,7 +13,8 @@ async function proxy(req: NextRequest) {
   try {
     let res: Response;
 
-    if (path === "upload" && req.method === "POST") {
+    const isMultipart = (path === "upload" || path === "send-envelope-manual") && req.method === "POST";
+    if (isMultipart) {
       // Forward multipart form data for file uploads
       const formData = await req.formData();
       res = await fetch(url, { method: "POST", body: formData });

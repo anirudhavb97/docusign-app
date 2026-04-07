@@ -8,8 +8,10 @@
  */
 import { Router, Request, Response } from "express";
 import multer from "multer";
+import axios from "axios";
 import { runFullPipeline } from "../services/ai-pipeline";
 import { sendEnvelope } from "../services/docusign/envelope";
+import { getAccessToken } from "../services/docusign/jwt-auth";
 import {
   extractPdfFromEmail,
   getInboxItems,
@@ -18,6 +20,9 @@ import {
   processUploadedFile,
   deleteInboxItem,
 } from "../services/fax-ingestion/agreement-desk";
+
+const DS_BASE_URL = () => process.env.DOCUSIGN_BASE_URL || "https://demo.docusign.net/restapi";
+const DS_ACCOUNT_ID = () => process.env.DOCUSIGN_ACCOUNT_ID!;
 
 export const faxRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -114,6 +119,101 @@ faxRouter.post("/upload", upload.single("document"), async (req: Request, res: R
     return res.json({ success: true, item });
   } catch (err: any) {
     console.error("[fax/upload] Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/fax/send-envelope-manual
+ * Create & send (or draft) a DocuSign envelope from scratch.
+ * Body: multipart with fields: document (file), signerName, signerEmail,
+ *       emailSubject, sendNow (true=sent, false=draft+embedded view), returnUrl
+ */
+faxRouter.post("/send-envelope-manual", upload.single("document"), async (req: Request, res: Response) => {
+  try {
+    const file = (req as any).file;
+    if (!file) return res.status(400).json({ error: "No document attached." });
+
+    const signerName  = req.body?.signerName  || "Recipient";
+    const signerEmail = req.body?.signerEmail  || "";
+    const emailSubject = req.body?.emailSubject || `Signature Required: ${file.originalname}`;
+    const sendNow     = req.body?.sendNow === "true";
+    const returnUrl   = req.body?.returnUrl || process.env.FRONTEND_URL || "https://glistening-nature-production.up.railway.app";
+
+    if (!signerEmail) return res.status(400).json({ error: "signerEmail is required." });
+
+    const pdfBase64 = file.buffer.toString("base64");
+    const docName   = file.originalname || `document_${Date.now()}.pdf`;
+
+    const accessToken = await getAccessToken();
+
+    // Place signHere tab at a sensible default location (last page, lower-left).
+    // The embedded sender view lets the user move/add tabs before sending.
+    const envelopeBody = {
+      status: sendNow ? "sent" : "created",
+      emailSubject,
+      emailBlurb: `Please review and sign: ${docName}`,
+      documents: [{
+        documentBase64: pdfBase64,
+        name: docName,
+        fileExtension: "pdf",
+        documentId: "1",
+      }],
+      recipients: {
+        signers: [{
+          email: signerEmail,
+          name: signerName,
+          recipientId: "1",
+          routingOrder: "1",
+          tabs: {
+            signHereTabs: [{
+              documentId: "1",
+              pageNumber: "1",
+              xPosition: "100",
+              yPosition: "650",
+              tabLabel: "SignHere",
+            }],
+          },
+        }],
+      },
+    };
+
+    let envRes: any;
+    try {
+      envRes = await axios.post(
+        `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes`,
+        envelopeBody,
+        { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
+      );
+    } catch (err: any) {
+      const dsErr = err.response?.data;
+      if (dsErr) throw new Error(dsErr.message || dsErr.errorCode || JSON.stringify(dsErr));
+      throw err;
+    }
+
+    const envelopeId = envRes.data.envelopeId;
+
+    if (sendNow) {
+      return res.json({ success: true, envelopeId, status: "sent" });
+    }
+
+    // Draft → create embedded sender view so user can place tabs + send
+    const senderReturnUrl = `${returnUrl}/send-envelope?done=true`;
+    let senderViewUrl = `https://apps-d.docusign.com/send/prepare/${envelopeId}`;
+    try {
+      const viewRes = await axios.post(
+        `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes/${envelopeId}/views/sender`,
+        { returnUrl: senderReturnUrl },
+        { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
+      );
+      senderViewUrl = viewRes.data.url;
+    } catch (e: any) {
+      console.warn("[send-envelope-manual] Sender view failed:", e.response?.data || e.message);
+    }
+
+    return res.json({ success: true, envelopeId, status: "created", senderViewUrl });
+  } catch (err: any) {
+    console.error("[send-envelope-manual]", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
