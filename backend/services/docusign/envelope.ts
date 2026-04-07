@@ -1,84 +1,84 @@
 /**
- * DocuSign Envelope Service
- * Creates and sends envelopes via eSign API based on AI classification results.
+ * DocuSign Envelope Sender
+ * Takes the EnvelopePrepResult and the actual PDF bytes, creates and sends the envelope.
  */
 import axios from "axios";
-import { ClassificationResult } from "../../../shared/types/classification";
-import { EnvelopeConfig, Tab } from "../../../shared/types/envelope";
+import { EnvelopePrepResult } from "../ai-pipeline/envelope-prep";
 
-const DS_BASE_URL = process.env.DOCUSIGN_BASE_URL;
-const DS_ACCOUNT_ID = process.env.DOCUSIGN_ACCOUNT_ID;
+const DS_BASE_URL = () => process.env.DOCUSIGN_BASE_URL || "https://demo.docusign.net/restapi";
+const DS_ACCOUNT_ID = () => process.env.DOCUSIGN_ACCOUNT_ID;
 
-function buildTabsFromClassification(classification: ClassificationResult): Tab[] {
-  return classification.suggestedTags.map((tag) => ({
-    tabType: tag.type === "signature" ? "signHere"
-      : tag.type === "initials" ? "initialHere"
-      : tag.type === "date_signed" ? "dateSigned"
-      : tag.type === "checkbox" ? "checkbox"
-      : "text",
-    pageNumber: String(tag.pageNumber),
-    xPosition: String(Math.round((tag.xPosition || 0.5) * 792)),
-    yPosition: String(Math.round((tag.yPosition || 0.9) * 612)),
-    anchorString: tag.anchorText,
-    anchorXOffset: "0",
-    anchorYOffset: "0",
-    required: tag.required,
-    tabLabel: tag.label,
-  }));
+export interface SendEnvelopeResult {
+  envelopeId: string;
+  status: string;
+  sentAt: string;
 }
 
-export async function createAndSendEnvelope(
+export async function sendEnvelope(
   accessToken: string,
   pdfBase64: string,
-  classification: ClassificationResult,
-  signerEmail: string,
-  signerName: string,
-  config: Partial<EnvelopeConfig> = {}
-): Promise<string> {
-  const tabs = buildTabsFromClassification(classification);
-  const fields = classification.extractedFields;
+  prepResult: EnvelopePrepResult,
+  signerEmail: string,        // resolved physician email (from NPI registry or manual)
+  signerName?: string
+): Promise<SendEnvelopeResult> {
+  if (!prepResult.envelope_needed || !prepResult.envelope_config) {
+    throw new Error(`Envelope not needed: ${prepResult.reason}`);
+  }
 
-  const subject = config.subject
-    || `Signature Required: ${fields.patientName ? `Patient ${fields.patientName} - ` : ""}${classification.bucket.replace(/_/g, " ").toUpperCase()}`;
+  const config = prepResult.envelope_config;
+
+  // Inject actual signer email (replaces RESOLVE_FROM_NPI_REGISTRY placeholder)
+  const signers = config.recipients.signers.map((s) => ({
+    ...s,
+    email: signerEmail,
+    name: signerName || s.name,
+  }));
 
   const envelopeDefinition = {
-    emailSubject: subject,
-    emailBlurb: config.message || "Please review and sign the attached healthcare document.",
-    status: "sent",
-    documents: [
-      {
-        documentBase64: pdfBase64,
-        name: `Healthcare_Document_${Date.now()}.pdf`,
-        fileExtension: "pdf",
-        documentId: "1",
-      },
-    ],
+    emailSubject: config.emailSubject,
+    emailBlurb: config.emailBlurb,
+    status: config.status,
+    documents: config.documents.map((doc) => ({
+      documentBase64: pdfBase64,
+      name: doc.name,
+      fileExtension: "pdf",
+      documentId: doc.documentId,
+    })),
     recipients: {
-      signers: [
-        {
-          email: signerEmail,
-          name: signerName,
-          recipientId: "1",
-          routingOrder: "1",
-          tabs: {
-            signHereTabs: tabs.filter((t) => t.tabType === "signHere").map((t) => ({
-              anchorString: t.anchorString,
-              anchorXOffset: t.anchorXOffset,
-              anchorYOffset: t.anchorYOffset,
-              pageNumber: t.pageNumber,
-              xPosition: t.xPosition,
-              yPosition: t.yPosition,
-            })),
-            initialHereTabs: tabs.filter((t) => t.tabType === "initialHere"),
-            dateSignedTabs: tabs.filter((t) => t.tabType === "dateSigned"),
-          },
+      signers: signers.map((signer) => ({
+        recipientId: signer.recipientId,
+        name: signer.name,
+        email: signer.email,
+        routingOrder: signer.routingOrder,
+        tabs: {
+          signHereTabs: (signer.tabs.signHereTabs || []).filter((t: any) => !t.skipped).map((t: any) => ({
+            anchorString: t.anchorString,
+            anchorMatchWholeWord: t.anchorMatchWholeWord,
+            anchorXOffset: t.anchorXOffset,
+            anchorYOffset: t.anchorYOffset,
+            anchorUnits: t.anchorUnits,
+            anchorIgnoreIfNotPresent: t.anchorIgnoreIfNotPresent,
+            tabLabel: t.tabLabel,
+            scaleValue: t.scaleValue || "1.0",
+          })),
+          dateSignedTabs: (signer.tabs.dateSignedTabs || []).filter((t: any) => !t.skipped).map((t: any) => ({
+            anchorString: t.anchorString,
+            anchorMatchWholeWord: t.anchorMatchWholeWord,
+            anchorXOffset: t.anchorXOffset,
+            anchorYOffset: t.anchorYOffset,
+            anchorUnits: t.anchorUnits,
+            anchorIgnoreIfNotPresent: t.anchorIgnoreIfNotPresent,
+            tabLabel: t.tabLabel,
+          })),
+          textTabs: signer.tabs.textTabs || [],
+          initialHereTabs: signer.tabs.initialHereTabs || [],
         },
-      ],
+      })),
     },
   };
 
   const response = await axios.post(
-    `${DS_BASE_URL}/v2.1/accounts/${DS_ACCOUNT_ID}/envelopes`,
+    `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes`,
     envelopeDefinition,
     {
       headers: {
@@ -88,5 +88,9 @@ export async function createAndSendEnvelope(
     }
   );
 
-  return response.data.envelopeId as string;
+  return {
+    envelopeId: response.data.envelopeId,
+    status: response.data.status,
+    sentAt: new Date().toISOString(),
+  };
 }

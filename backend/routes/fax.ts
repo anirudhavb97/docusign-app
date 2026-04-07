@@ -1,54 +1,122 @@
+/**
+ * Fax ingestion routes
+ *
+ * GET  /api/fax/inbox-items          — All processed inbox items (polled by UI every 10s)
+ * POST /api/fax/create-envelope/:id  — Create a DRAFT DocuSign envelope for an inbox item
+ * POST /api/fax/process              — Manual PDF upload → full AI pipeline
+ * POST /api/fax/email-webhook        — Raw email webhook (SMTP forwarding compat)
+ */
 import { Router, Request, Response } from "express";
 import multer from "multer";
-import { runDocumentPipeline } from "../services/ai-pipeline";
-import { createAndSendEnvelope } from "../services/docusign/envelope";
+import { runFullPipeline } from "../services/ai-pipeline";
+import { sendEnvelope } from "../services/docusign/envelope";
+import {
+  extractPdfFromEmail,
+  getInboxItems,
+  createDraftEnvelope,
+  runPoll,
+} from "../services/fax-ingestion/agreement-desk";
 
 export const faxRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-// POST /api/fax/ingest - Called by Agreement Desk webhook on fax receipt
-faxRouter.post("/ingest", upload.single("document"), async (req: Request, res: Response) => {
+/**
+ * GET /api/fax/inbox-items
+ * Returns all inbox items (processing + classified + envelope_created).
+ * UI polls this every 10 seconds to show live status.
+ */
+faxRouter.get("/inbox-items", (_req: Request, res: Response) => {
+  res.json({ items: getInboxItems() });
+});
+
+/**
+ * POST /api/fax/poll-now
+ * Manually trigger an immediate poll (for the refresh button in UI).
+ */
+faxRouter.post("/poll-now", async (_req: Request, res: Response) => {
   try {
-    const file = req.file;
-    if (!file) return res.status(400).json({ error: "No document attached" });
+    await runPoll();
+    res.json({ success: true, items: getInboxItems() });
+  } catch (err: any) {
+    console.error("[fax/poll-now] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/fax/create-envelope/:id
+ * Creates a DRAFT DocuSign envelope for the given inbox item.
+ * Physician email is derived as firstname.lastname@hospital.com.
+ * User reviews the draft in DocuSign and sends it themselves.
+ */
+faxRouter.post("/create-envelope/:id", async (req: Request, res: Response) => {
+  try {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const result = await createDraftEnvelope(id);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    console.error("[fax/create-envelope] Error:", err.message);
+    if (err.response) console.error("DS response:", err.response.status, JSON.stringify(err.response.data));
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/fax/process
+ * Manual PDF upload → full AI pipeline (for testing without Agreement Desk).
+ */
+faxRouter.post("/process", upload.single("document"), async (req: Request, res: Response) => {
+  try {
+    const file = (req as any).file;
+    if (!file) return res.status(400).json({ error: "No document attached. Send PDF as multipart field 'document'." });
 
     const pdfBase64 = file.buffer.toString("base64");
+    const documentName = file.originalname || `fax_${Date.now()}.pdf`;
+    console.log(`[fax/process] Processing: ${documentName} (${Math.round(file.size / 1024)}KB)`);
 
-    // Run OCR + classification pipeline
-    const { ocrText, classification } = await runDocumentPipeline(pdfBase64);
+    const pipelineResult = await runFullPipeline(pdfBase64, documentName);
 
-    const result: any = {
-      classification,
-      ocrTextPreview: ocrText.slice(0, 500),
-      requiresSignature: classification.requiresSignature,
-    };
-
-    // If signature required, auto-create envelope
-    if (classification.requiresSignature && req.body.signerEmail) {
-      const envelopeId = await createAndSendEnvelope(
-        req.body.accessToken,
-        pdfBase64,
-        classification,
-        req.body.signerEmail,
-        req.body.signerName || "Provider",
+    let envelopeResult = null;
+    if (pipelineResult.envelopePrep.envelope_needed && req.body.signerEmail && req.body.dsAccessToken) {
+      envelopeResult = await sendEnvelope(
+        req.body.dsAccessToken, pdfBase64, pipelineResult.envelopePrep,
+        req.body.signerEmail, req.body.signerName
       );
-      result.envelopeId = envelopeId;
-      result.envelopeCreated = true;
     }
 
-    return res.json(result);
+    return res.json({ success: true, documentName, ...pipelineResult, envelopeResult });
   } catch (err: any) {
-    console.error("[fax/ingest]", err);
+    console.error("[fax/process] Error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// POST /api/fax/send - Simulate payer sending a fax
-faxRouter.post("/send", upload.single("document"), async (req: Request, res: Response) => {
+/**
+ * POST /api/fax/email-webhook
+ * Raw email webhook for SMTP-forwarded faxes (compat).
+ */
+faxRouter.post("/email-webhook", upload.fields([{ name: "email" }, { name: "document" }]), async (req: Request, res: Response) => {
   try {
-    // In production: call SRFax/eFax API to send to Agreement Desk number
-    return res.json({ message: "Fax queued for sending", toNumber: req.body.toNumber });
+    const files = (req as any).files as Record<string, Express.Multer.File[]>;
+    let pdfBase64: string;
+    let documentName: string;
+
+    if (files?.email?.[0]) {
+      const extracted = await extractPdfFromEmail(files.email[0].buffer);
+      if (!extracted) return res.status(400).json({ error: "No PDF attachment found in email" });
+      pdfBase64 = extracted.pdfBase64;
+      documentName = extracted.filename;
+    } else if (files?.document?.[0]) {
+      pdfBase64 = files.document[0].buffer.toString("base64");
+      documentName = files.document[0].originalname || `fax_${Date.now()}.pdf`;
+    } else {
+      return res.status(400).json({ error: "No email or document field found" });
+    }
+
+    const pipelineResult = await runFullPipeline(pdfBase64, documentName);
+    return res.json({ received: true, action: pipelineResult.classification?.classification?.action });
   } catch (err: any) {
+    console.error("[email-webhook] Error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
