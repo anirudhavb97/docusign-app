@@ -491,7 +491,10 @@ export async function createDraftEnvelope(
   try {
     const viewResponse = await axios.post(
       `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes/${draftEnvelopeId}/views/sender`,
-      { returnUrl: senderReturnUrl },
+      {
+        returnUrl: senderReturnUrl,
+        startingScreen: "Prepare",   // show Recipients page first, then Add Fields, then Send
+      },
       { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
     );
     senderViewUrl = viewResponse.data.url;

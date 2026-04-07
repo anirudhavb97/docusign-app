@@ -63,50 +63,55 @@ export interface EnvelopePrepResult {
 }
 
 /**
- * Detects exact signature tab locations by sending the PDF to Claude vision.
- * Returns coordinate-based tabs (page + x/y in DocuSign units).
+ * Anchor-string tab detection via Claude vision.
  *
- * DocuSign coordinate system: 1 unit = 1pt (1/72 inch).
- * US Letter page = 612 wide × 792 tall.  (0,0) = top-left of page.
+ * WHY ANCHORS INSTEAD OF COORDINATES:
+ * Pixel/point coordinates require us to map Claude's visual perception to
+ * DocuSign's internal coordinate system — this mapping is imprecise and
+ * produces misplaced tabs. Anchor strings are far more reliable: we find
+ * the EXACT TEXT that appears just before each blank signature line and
+ * pass it to DocuSign, which does its own precise text search and places
+ * the tab right next to that text.
+ *
+ * For each blank field Claude returns:
+ *   anchorString    — the exact printed label text (e.g. "Provider Signature for Jeremy Ross, MD")
+ *   blankPosition   — "right" (blank is on the same line, to the right of the label)
+ *                     "below" (blank is on the next line below the label)
+ *   tabType         — "signature" | "date"
+ *   pageNumber      — which page (1-based)
  */
-async function detectTabsFromPdf(pdfBase64: string, totalPages: number): Promise<{
+async function detectTabsFromPdf(pdfBase64: string): Promise<{
   signHereTabs: any[];
   dateSignedTabs: any[];
 }> {
-  const prompt = `You are a DocuSign integration engineer. I will show you a healthcare PDF document.
-Your job is to locate EVERY blank signature line and date line so we can place DocuSign signature tabs precisely.
+  const prompt = `You are a DocuSign integration engineer analyzing a healthcare PDF.
 
-RULES:
-- A signature line is a blank underline labeled "Signature", "Provider Signature", "Physician Signature", "Authorized Signature", or similar.
-- A date line is a blank underline labeled "Date", "Dated", "Date Signed", or similar next to a signature line.
-- A blank underline with NO mark on it = needs a tab. An underline with ink/handwriting on it = already signed, skip it.
-- For each blank field, estimate its location on the page as a fraction of page height (yFraction: 0.0 = top, 1.0 = bottom) and page width (xFraction: 0.0 = left, 1.0 = right).
-- A US Letter page is 612 wide × 792 tall in DocuSign units (points). Multiply your fractions by these to get xPosition and yPosition.
-- Subtract 20 from yPosition so the tab sits above the line, not below it.
+Find EVERY blank signature line and blank date line in this document.
 
-Return ONLY valid JSON with this exact structure — no markdown, no explanation:
+WHAT TO LOOK FOR:
+- A blank signature line is a printed label (like "Signature:", "Provider Signature", "Physician Signature", "Authorized Signature", "Signature of Author", etc.) followed by a long blank underline (______ or an empty line).
+- A blank date line is a label ("Date:", "Dated:", "Date Signed:", "Date:") followed by a blank underline.
+- SKIP any line that already has a handwritten mark, a typed name, or ink on it.
+
+FOR EACH BLANK FIELD, identify:
+1. anchorString: the EXACT text of the printed label as it appears in the document (copy it character-for-character, including any name like "Provider Signature for Jeremy Ross, MD"). Keep it unique — include enough context to distinguish it from other labels on the page.
+2. blankPosition: "right" if the blank underline is on the same line to the right of the label; "below" if the blank is on a separate line underneath the label.
+3. tabType: "signature" or "date"
+4. pageNumber: which page number (integer, 1-based)
+
+Return ONLY valid JSON — no markdown fences, no explanation:
 {
-  "signHereTabs": [
+  "fields": [
     {
-      "documentId": "1",
-      "pageNumber": "<page number as string, e.g. '1'>",
-      "xPosition": "<x in DocuSign points as string>",
-      "yPosition": "<y in DocuSign points as string>",
-      "tabLabel": "PhysicianSignature_P<page>"
-    }
-  ],
-  "dateSignedTabs": [
-    {
-      "documentId": "1",
-      "pageNumber": "<page number as string>",
-      "xPosition": "<x in DocuSign points as string>",
-      "yPosition": "<y in DocuSign points as string>",
-      "tabLabel": "DateSigned_P<page>"
+      "anchorString": "<exact label text from document>",
+      "blankPosition": "right" | "below",
+      "tabType": "signature" | "date",
+      "pageNumber": <integer>
     }
   ]
 }
 
-If there are no blank signature lines, return { "signHereTabs": [], "dateSignedTabs": [] }.`;
+If no blank fields are found, return { "fields": [] }.`;
 
   const response = await getClient().messages.create({
     model: "claude-sonnet-4-6",
@@ -129,15 +134,45 @@ If there are no blank signature lines, return { "signHereTabs": [], "dateSignedT
   const jsonMatch = text.text.match(/```json\n?([\s\S]*?)\n?```/) || text.text.match(/(\{[\s\S]*\})/);
   if (!jsonMatch) return { signHereTabs: [], dateSignedTabs: [] };
 
+  let fields: any[] = [];
   try {
     const result = JSON.parse(jsonMatch[1] || jsonMatch[0]);
-    return {
-      signHereTabs: Array.isArray(result.signHereTabs) ? result.signHereTabs : [],
-      dateSignedTabs: Array.isArray(result.dateSignedTabs) ? result.dateSignedTabs : [],
-    };
+    fields = Array.isArray(result.fields) ? result.fields : [];
   } catch {
     return { signHereTabs: [], dateSignedTabs: [] };
   }
+
+  const signHereTabs: any[] = [];
+  const dateSignedTabs: any[] = [];
+
+  fields.forEach((f: any, i: number) => {
+    if (!f.anchorString) return;
+
+    // Offsets depend on whether the blank is to the right or below the label text.
+    // "right": tab goes to the right of the anchor text on the same line.
+    //   anchorXOffset = ~100px (past the end of the label), anchorYOffset = 0
+    // "below": tab goes on the next line under the anchor text.
+    //   anchorXOffset = 0, anchorYOffset = ~20px (one line height)
+    const isBelow = f.blankPosition === "below";
+    const baseTab = {
+      tabLabel: `${f.tabType === "date" ? "DateSigned" : "PhysicianSign"}_${i + 1}`,
+      anchorString: f.anchorString,
+      anchorMatchWholeWord: "false",
+      anchorCaseSensitive: "false",
+      anchorXOffset: isBelow ? "0" : "100",
+      anchorYOffset: isBelow ? "20" : "0",
+      anchorUnits: "pixels",
+      anchorIgnoreIfNotPresent: "true",   // never causes a 400 if text not found
+    };
+
+    if (f.tabType === "date") {
+      dateSignedTabs.push(baseTab);
+    } else {
+      signHereTabs.push(baseTab);
+    }
+  });
+
+  return { signHereTabs, dateSignedTabs };
 }
 
 export async function prepareEnvelope(
@@ -169,57 +204,61 @@ export async function prepareEnvelope(
   const physicianName = ingestion.provider.ordering_physician_name || "Ordering Physician";
   const totalPages = ingestion.source.total_pages || 1;
 
-  // ── Vision-based tab detection (primary) ─────────────────────────────────
-  // Send the actual PDF to Claude so it can see where the blank lines are.
+  // ── Anchor-string detection via Claude vision (primary) ──────────────────
+  // Claude reads the PDF visually and returns the EXACT printed label text
+  // just before each blank signature/date line. DocuSign then finds that text
+  // and places the tab precisely next to it — far more accurate than coordinates.
   let visionTabs: { signHereTabs: any[]; dateSignedTabs: any[] } = { signHereTabs: [], dateSignedTabs: [] };
   if (pdfBase64) {
     try {
-      console.log("[envelope-prep] Running vision-based tab detection...");
-      visionTabs = await detectTabsFromPdf(pdfBase64, totalPages);
-      console.log(`[envelope-prep] Vision found ${visionTabs.signHereTabs.length} signHere + ${visionTabs.dateSignedTabs.length} date tabs`);
+      console.log("[envelope-prep] Detecting signature line anchors via vision...");
+      visionTabs = await detectTabsFromPdf(pdfBase64);
+      console.log(`[envelope-prep] Vision anchors: ${visionTabs.signHereTabs.length} signHere, ${visionTabs.dateSignedTabs.length} date`);
     } catch (e: any) {
-      console.warn("[envelope-prep] Vision tab detection failed:", e.message);
+      console.warn("[envelope-prep] Vision anchor detection failed:", e.message);
     }
   }
 
-  // ── Anchor-based fallback (when vision finds nothing) ────────────────────
-  // Use common healthcare signature label strings as anchors.
-  // anchorIgnoreIfNotPresent=true so DocuSign never rejects with 400.
-  const anchorFallbackSign = [
-    "Provider Signature",
-    "Physician Signature",
-    "Authorized Signature",
-    "Ordering Physician Signature",
-    "Signature of Author",
-    "Signature of Physician",
-    "Signature:",
-    "Signature",
+  // ── Generic anchor fallback ───────────────────────────────────────────────
+  // If vision found nothing, use the most common healthcare signature label
+  // strings. These cover ~95% of real documents. Each has anchorIgnoreIfNotPresent
+  // so DocuSign never rejects with 400 if the text isn't there.
+  // blankPosition is "below" for most standalone labels, "right" for "Signature:".
+  const fallbackSignAnchors: Array<{ text: string; position: "right" | "below" }> = [
+    { text: "Provider Signature",           position: "below" },
+    { text: "Physician Signature",          position: "below" },
+    { text: "Authorized Signature",         position: "below" },
+    { text: "Ordering Physician Signature", position: "below" },
+    { text: "Signature of Author",          position: "below" },
+    { text: "Signature of Physician",       position: "below" },
+    { text: "Signature:",                   position: "right" },
+    { text: "Signature",                    position: "below" },
   ];
-  const anchorFallbackDate = ["Date:", "Date"];
+  const fallbackDateAnchors: Array<{ text: string; position: "right" | "below" }> = [
+    { text: "Date:", position: "right" },
+    { text: "Date",  position: "right" },
+  ];
+
+  function makeAnchorTab(anchor: { text: string; position: "right" | "below" }, i: number, prefix: string) {
+    return {
+      tabLabel: `${prefix}_${i + 1}`,
+      anchorString: anchor.text,
+      anchorMatchWholeWord: "false",
+      anchorCaseSensitive: "false",
+      anchorXOffset: anchor.position === "right" ? "100" : "0",
+      anchorYOffset: anchor.position === "below" ? "20" : "0",
+      anchorUnits: "pixels",
+      anchorIgnoreIfNotPresent: "true",
+    };
+  }
 
   const signHereTabs = visionTabs.signHereTabs.length > 0
     ? visionTabs.signHereTabs
-    : anchorFallbackSign.map((anchor, i) => ({
-        tabLabel: `PhysicianSignature_${i + 1}`,
-        anchorString: anchor,
-        anchorMatchWholeWord: "false",
-        anchorXOffset: "0",
-        anchorYOffset: "20",
-        anchorUnits: "pixels",
-        anchorIgnoreIfNotPresent: "true",
-      }));
+    : fallbackSignAnchors.map((a, i) => makeAnchorTab(a, i, "PhysicianSign"));
 
   const dateSignedTabs = visionTabs.dateSignedTabs.length > 0
     ? visionTabs.dateSignedTabs
-    : anchorFallbackDate.map((anchor, i) => ({
-        tabLabel: `DateSigned_${i + 1}`,
-        anchorString: anchor,
-        anchorMatchWholeWord: "false",
-        anchorXOffset: "40",
-        anchorYOffset: "20",
-        anchorUnits: "pixels",
-        anchorIgnoreIfNotPresent: "true",
-      }));
+    : fallbackDateAnchors.map((a, i) => makeAnchorTab(a, i, "DateSigned"));
 
   return {
     envelope_needed: true,
