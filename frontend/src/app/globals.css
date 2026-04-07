@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+:root {
+  --ds-purple: #26154a;
+  --ds-purple-hover: #1e1038;
+}
+
+body {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  background: #ffffff;
+  color: #1a1a1a;
+}

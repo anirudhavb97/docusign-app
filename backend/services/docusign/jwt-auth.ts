@@ -30,7 +30,10 @@ let refreshTimer: NodeJS.Timeout | null = null;
 // ── JWT builder ──────────────────────────────────────────────────────────────
 
 function buildJwt(): string {
-  const privateKey = fs.readFileSync(PRIVATE_KEY_PATH, "utf8");
+  // Prefer env var (production/Railway), fall back to file (local dev)
+  const privateKey = process.env.DOCUSIGN_PRIVATE_KEY
+    ? process.env.DOCUSIGN_PRIVATE_KEY.replace(/\\n/g, "\n")
+    : fs.readFileSync(PRIVATE_KEY_PATH, "utf8");
   const now = Math.floor(Date.now() / 1000);
 
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
@@ -113,9 +116,9 @@ export async function getAccessToken(): Promise<string> {
  * Prints the consent URL if JWT auth hasn't been consented yet.
  */
 export async function initJwtAuth(): Promise<boolean> {
-  // Check key file exists
-  if (!fs.existsSync(PRIVATE_KEY_PATH)) {
-    console.warn("[jwt-auth] Private key not found at", PRIVATE_KEY_PATH, "— using static token from .env");
+  // Check key is available (env var or file)
+  if (!process.env.DOCUSIGN_PRIVATE_KEY && !fs.existsSync(PRIVATE_KEY_PATH)) {
+    console.warn("[jwt-auth] No private key found (DOCUSIGN_PRIVATE_KEY env var or file) — using static token from .env");
     return false;
   }
 
