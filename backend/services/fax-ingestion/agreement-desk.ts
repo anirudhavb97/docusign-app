@@ -14,6 +14,7 @@ import axios from "axios";
 import { randomUUID } from "crypto";
 import { simpleParser } from "mailparser";
 import { runFullPipeline } from "../ai-pipeline";
+import { getAccessToken } from "../docusign/jwt-auth";
 
 const DS_BASE_URL = () => process.env.DOCUSIGN_BASE_URL || "https://demo.docusign.net/restapi";
 const DS_ACCOUNT_ID = () => process.env.DOCUSIGN_ACCOUNT_ID!;
@@ -80,8 +81,7 @@ const BUCKET_LABELS: Record<string, string> = {
 // ── DocuSign API helpers ─────────────────────────────────────────────────────
 
 async function getInboxEnvelopes(): Promise<any[]> {
-  const accessToken = process.env.DOCUSIGN_ACCESS_TOKEN;
-  if (!accessToken) throw new Error("No DOCUSIGN_ACCESS_TOKEN configured");
+  const accessToken = await getAccessToken();
 
   // Look back 90 days to catch all recent faxes
   const fromDate = new Date();
@@ -122,7 +122,7 @@ async function getInboxEnvelopes(): Promise<any[]> {
 async function downloadDocumentAsBase64(
   envelopeId: string
 ): Promise<{ pdfBase64: string; filename: string } | null> {
-  const accessToken = process.env.DOCUSIGN_ACCESS_TOKEN!;
+  const accessToken = await getAccessToken();
   try {
     const docsResponse = await axios.get(
       `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes/${envelopeId}/documents`,
@@ -296,8 +296,8 @@ export function deleteInboxItem(id: string): boolean {
 
 /** Check if any envelope_created items have been signed in DocuSign */
 export async function checkSignedEnvelopes(): Promise<void> {
-  const accessToken = process.env.DOCUSIGN_ACCESS_TOKEN;
-  if (!accessToken) return;
+  let accessToken: string;
+  try { accessToken = await getAccessToken(); } catch { return; }
 
   const pending = Array.from(inboxItems.values()).filter(
     i => i.status === "envelope_created" && i.draftEnvelopeId
@@ -328,9 +328,9 @@ export async function createDraftEnvelope(itemId: string): Promise<{ draftEnvelo
 
   const pipeline = item.pipelineResult;
   const envConfig = pipeline.envelopePrep?.envelope_config;
-  const ing = pipeline.ingestion;
 
-  const accessToken = process.env.DOCUSIGN_ACCESS_TOKEN!;
+  // Always use getAccessToken() so we get an auto-refreshed JWT token (never stale)
+  const accessToken = await getAccessToken();
 
   // For uploaded files use stored PDF; for DocuSign envelopes re-download
   const pdfB64 = item._pdfBase64
@@ -338,22 +338,30 @@ export async function createDraftEnvelope(itemId: string): Promise<{ draftEnvelo
     : await downloadDocumentAsBase64(itemId);
   if (!pdfB64) throw new Error("Could not retrieve PDF");
 
-  // Derive signer email firstname.lastname@hospital.com
+  // Derive signer info
   const signerEmail = item.physicianEmail || "physician@hospital.com";
-  const signerName = item.physicianName || "Ordering Physician";
+  const signerName  = item.physicianName  || "Ordering Physician";
 
-  // Build tabs from envelope prep (or minimal fallback)
-  const tabs = envConfig?.recipients?.signers?.[0]?.tabs || {
-    signHereTabs: [{ anchorString: "/sig/", anchorXOffset: "0", anchorYOffset: "0", anchorIgnoreIfNotPresent: "true" }],
+  // Use page-coordinate signHere tab on page 1 — avoids anchor-string 400 errors
+  // when the AI-generated anchor text isn't found in the actual PDF.
+  const tabs = {
+    signHereTabs: [{
+      documentId: "1",
+      pageNumber: "1",
+      xPosition: "100",
+      yPosition: "700",
+    }],
   };
 
+  const docName = item.filename.endsWith(".pdf") ? item.filename : `${item.filename}.pdf`;
+
   const envelopeBody = {
-    status: "created",  // DRAFT — user will review and send
+    status: "created",  // DRAFT — physician reviews and sends in DocuSign
     emailSubject: envConfig?.emailSubject || `Signature Required: ${item.filename}`,
     emailBlurb: `Please review and sign the attached healthcare document: ${item.filename}`,
     documents: [{
       documentBase64: pdfB64.pdfBase64,
-      name: item.filename,
+      name: docName,
       fileExtension: "pdf",
       documentId: "1",
     }],
@@ -368,11 +376,22 @@ export async function createDraftEnvelope(itemId: string): Promise<{ draftEnvelo
     },
   };
 
-  const response = await axios.post(
-    `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes`,
-    envelopeBody,
-    { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
-  );
+  let response: any;
+  try {
+    response = await axios.post(
+      `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes`,
+      envelopeBody,
+      { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
+    );
+  } catch (err: any) {
+    // Surface the actual DocuSign error body for easier debugging
+    const dsErr = err.response?.data;
+    if (dsErr) {
+      console.error("[agreement-desk] DocuSign API error:", JSON.stringify(dsErr));
+      throw new Error(dsErr.message || dsErr.errorCode || JSON.stringify(dsErr));
+    }
+    throw err;
+  }
 
   const draftEnvelopeId = response.data.envelopeId;
 
