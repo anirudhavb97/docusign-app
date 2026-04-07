@@ -5,7 +5,7 @@
  * Output: IngestionResult JSON per skill spec
  */
 import Anthropic from "@anthropic-ai/sdk";
-import { v4 as uuid } from "uuid";
+import { randomUUID as uuid } from "crypto";
 
 const getClient = () => new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
