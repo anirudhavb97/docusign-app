@@ -374,8 +374,20 @@ export async function checkSignedEnvelopes(): Promise<void> {
   }
 }
 
-/** Creates a DRAFT DocuSign envelope for an inbox item */
-export async function createDraftEnvelope(itemId: string): Promise<{ draftEnvelopeId: string; viewUrl: string }> {
+/** Strips non-DocuSign fields from tab objects returned by the AI */
+function cleanTab(tab: any): any {
+  const { skipped, skip_reason, tab_created, already_completed, ...clean } = tab;
+  return clean;
+}
+
+/**
+ * Creates a DRAFT DocuSign envelope for an inbox item and returns an
+ * embedded Sender View URL — no extra DocuSign login required.
+ */
+export async function createDraftEnvelope(
+  itemId: string,
+  returnUrl?: string,
+): Promise<{ draftEnvelopeId: string; senderViewUrl: string }> {
   const item = inboxItems.get(itemId);
   if (!item) throw new Error(`Item ${itemId} not found`);
   if (!item.pipelineResult) throw new Error("Pipeline not yet complete for this item");
@@ -383,34 +395,55 @@ export async function createDraftEnvelope(itemId: string): Promise<{ draftEnvelo
   const pipeline = item.pipelineResult;
   const envConfig = pipeline.envelopePrep?.envelope_config;
 
-  // Always use getAccessToken() so we get an auto-refreshed JWT token (never stale)
+  // Always get a fresh JWT token
   const accessToken = await getAccessToken();
 
-  // For uploaded files use stored PDF; for DocuSign envelopes re-download
+  // Retrieve the PDF
   const pdfB64 = item._pdfBase64
     ? { pdfBase64: item._pdfBase64, filename: item.filename }
     : await downloadDocumentAsBase64(itemId);
   if (!pdfB64) throw new Error("Could not retrieve PDF");
 
-  // Derive signer info
+  // Signer info
   const signerEmail = item.physicianEmail || "physician@hospital.com";
   const signerName  = item.physicianName  || "Ordering Physician";
 
-  // Use page-coordinate signHere tab on page 1 — avoids anchor-string 400 errors
-  // when the AI-generated anchor text isn't found in the actual PDF.
-  const tabs = {
-    signHereTabs: [{
+  // ── Tab placement ─────────────────────────────────────────────────────────
+  // Priority 1: vision-detected coordinate tabs from pipeline's envelopePrep
+  // Priority 2: anchor-string fallback tabs from pipeline's envelopePrep
+  // Priority 3: hardcoded last-resort (last page, near bottom)
+  let signHereTabs: any[] = [];
+  let dateSignedTabs: any[] = [];
+
+  const prepTabs = envConfig?.recipients?.signers?.[0]?.tabs;
+  if (prepTabs?.signHereTabs?.length > 0) {
+    signHereTabs = prepTabs.signHereTabs.map(cleanTab);
+    dateSignedTabs = (prepTabs.dateSignedTabs || []).map(cleanTab);
+    console.log(`[agreement-desk] Using ${signHereTabs.length} signHere tab(s) from envelope prep`);
+  } else {
+    // Last-resort: place on last page near the bottom
+    const totalPages = pipeline.ingestion?.source?.total_pages || 1;
+    signHereTabs = [{
       documentId: "1",
-      pageNumber: "1",
+      pageNumber: String(totalPages),
       xPosition: "100",
-      yPosition: "700",
-    }],
-  };
+      yPosition: "650",
+      tabLabel: "PhysicianSignature",
+    }];
+    dateSignedTabs = [{
+      documentId: "1",
+      pageNumber: String(totalPages),
+      xPosition: "380",
+      yPosition: "650",
+      tabLabel: "DateSigned",
+    }];
+    console.log("[agreement-desk] No tabs from pipeline — using last-page fallback");
+  }
 
   const docName = item.filename.endsWith(".pdf") ? item.filename : `${item.filename}.pdf`;
 
   const envelopeBody = {
-    status: "created",  // DRAFT — physician reviews and sends in DocuSign
+    status: "created",   // DRAFT — physician reviews and sends from DocuSign UI
     emailSubject: envConfig?.emailSubject || `Signature Required: ${item.filename}`,
     emailBlurb: `Please review and sign the attached healthcare document: ${item.filename}`,
     documents: [{
@@ -425,39 +458,56 @@ export async function createDraftEnvelope(itemId: string): Promise<{ draftEnvelo
         name: signerName,
         recipientId: "1",
         routingOrder: "1",
-        tabs,
+        tabs: { signHereTabs, dateSignedTabs },
       }],
     },
   };
 
-  let response: any;
+  // ── Create the envelope ───────────────────────────────────────────────────
+  let envelopeResponse: any;
   try {
-    response = await axios.post(
+    envelopeResponse = await axios.post(
       `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes`,
       envelopeBody,
       { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
     );
   } catch (err: any) {
-    // Surface the actual DocuSign error body for easier debugging
     const dsErr = err.response?.data;
     if (dsErr) {
-      console.error("[agreement-desk] DocuSign API error:", JSON.stringify(dsErr));
+      console.error("[agreement-desk] DocuSign envelope create error:", JSON.stringify(dsErr));
       throw new Error(dsErr.message || dsErr.errorCode || JSON.stringify(dsErr));
     }
     throw err;
   }
 
-  const draftEnvelopeId = response.data.envelopeId;
+  const draftEnvelopeId = envelopeResponse.data.envelopeId;
+
+  // ── Create Embedded Sender View ───────────────────────────────────────────
+  // This returns a pre-authenticated URL — no DocuSign login needed.
+  const backUrl = returnUrl || process.env.FRONTEND_URL || "https://glistening-nature-production.up.railway.app";
+  const senderReturnUrl = `${backUrl}/agreements/requests`;
+
+  let senderViewUrl: string;
+  try {
+    const viewResponse = await axios.post(
+      `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes/${draftEnvelopeId}/views/sender`,
+      { returnUrl: senderReturnUrl },
+      { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
+    );
+    senderViewUrl = viewResponse.data.url;
+    console.log(`[agreement-desk] Embedded sender view created for ${draftEnvelopeId}`);
+  } catch (err: any) {
+    // If sender view fails, fall back to the standard DocuSign prepare URL
+    console.warn("[agreement-desk] Sender view failed, using fallback URL:", err.response?.data || err.message);
+    senderViewUrl = `https://apps-d.docusign.com/send/prepare/${draftEnvelopeId}`;
+  }
 
   // Update item status
   inboxItems.set(itemId, { ...item, status: "envelope_created", draftEnvelopeId });
   persistItems();
 
-  // Build the DocuSign web app URL to view the draft
-  const viewUrl = `https://apps-d.docusign.com/send/prepare/${draftEnvelopeId}`;
-
-  console.log(`[agreement-desk] Draft envelope created: ${draftEnvelopeId} for ${signerEmail}`);
-  return { draftEnvelopeId, viewUrl };
+  console.log(`[agreement-desk] ✓ Envelope ${draftEnvelopeId} ready for ${signerEmail}`);
+  return { draftEnvelopeId, senderViewUrl };
 }
 
 /**

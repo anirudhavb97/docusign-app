@@ -171,13 +171,21 @@ export default function RequestsPage() {
 
   function handleCreateEnvelope(item: InboxItem) {
     setCreating(item.id);
-    fetch(`/api/fax?path=create-envelope/${item.id}`, { method: "POST" })
+    const returnUrl = window.location.origin;
+    fetch(`/api/fax?path=create-envelope/${item.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ returnUrl }),
+    })
       .then(r => r.json())
       .then(d => {
         if (d.error) throw new Error(d.error);
-        showToast("Draft envelope created — opening DocuSign…", "success");
+        showToast("Envelope created — opening DocuSign prepare view…", "success");
         loadItems();
-        window.open(d.viewUrl, "_blank");
+        // Redirect in same tab — DocuSign will bounce back here when done
+        if (d.senderViewUrl) {
+          window.location.href = d.senderViewUrl;
+        }
       })
       .catch(e => showToast(e.message, "error"))
       .finally(() => setCreating(null));

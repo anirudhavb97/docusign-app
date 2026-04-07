@@ -29,8 +29,9 @@ export async function runFullPipeline(
   const classification = await classifyDocument(ingestion);
   console.log(`[pipeline] Classified as: ${classification.classification.bucket} (${Math.round(classification.classification.confidence * 100)}%) → action: ${classification.classification.action}`);
 
-  console.log("[pipeline] Step 3/3: Preparing envelope config...");
-  const envelopePrep = await prepareEnvelope(ingestion, classification, documentName);
+  console.log("[pipeline] Step 3/3: Preparing envelope config (vision-based tab detection)...");
+  // Pass pdfBase64 so envelope prep can visually detect signature line coordinates
+  const envelopePrep = await prepareEnvelope(ingestion, classification, documentName, pdfBase64);
   console.log(`[pipeline] Envelope needed: ${envelopePrep.envelope_needed}`);
 
   return {

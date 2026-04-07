@@ -54,7 +54,8 @@ faxRouter.post("/poll-now", async (_req: Request, res: Response) => {
 faxRouter.post("/create-envelope/:id", async (req: Request, res: Response) => {
   try {
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const result = await createDraftEnvelope(id);
+    const returnUrl = req.body?.returnUrl as string | undefined;
+    const result = await createDraftEnvelope(id, returnUrl);
     res.json({ success: true, ...result });
   } catch (err: any) {
     console.error("[fax/create-envelope] Error:", err.message);
