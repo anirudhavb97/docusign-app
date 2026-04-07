@@ -409,49 +409,19 @@ export async function createDraftEnvelope(
   const signerName  = item.physicianName  || "Ordering Physician";
 
   // ── Tab placement ─────────────────────────────────────────────────────────
-  // Priority 1: vision-detected coordinate tabs from pipeline's envelopePrep
-  // Priority 2: anchor-string fallback tabs from pipeline's envelopePrep
-  // Priority 3: hardcoded last-resort (last page, near bottom)
-  // ── Tab strategy ──────────────────────────────────────────────────────────
-  // We ALWAYS guarantee coordinate-based tabs on the last page so DocuSign
-  // never shows an empty tagging view. Anchor tabs from the vision pipeline
-  // are included AS WELL — if DocuSign finds the anchor text they appear at
-  // the exact signature line; if not, DocuSign silently skips them
-  // (anchorIgnoreIfNotPresent=true) and the coordinate tab is still there.
-  // The sender can move/delete tabs freely before hitting Send.
-  const totalPages = pipeline.ingestion?.source?.total_pages || 1;
-
-  // Coordinate fallback — always included, lands in the lower-left of the
-  // last page where signature lines almost always live in healthcare docs.
-  const coordSignTab = {
-    documentId: "1",
-    pageNumber: String(totalPages),
-    xPosition: "75",
-    yPosition: "620",
-    tabLabel: "PhysicianSignature_Coord",
-  };
-  const coordDateTab = {
-    documentId: "1",
-    pageNumber: String(totalPages),
-    xPosition: "350",
-    yPosition: "620",
-    tabLabel: "DateSigned_Coord",
-  };
-
-  // Anchor tabs from vision pipeline (empty array if vision found nothing)
+  // Tabs come entirely from the envelope-prep vision pipeline, which uses
+  // percentage-based coordinate detection (no anchor string matching needed).
+  // envelope-prep already includes a smart fallback if vision finds nothing.
+  // We just pass the tabs through cleanly — no extra hardcoded coords here.
   const prepTabs = envConfig?.recipients?.signers?.[0]?.tabs;
-  const anchorSignTabs: any[] = prepTabs?.signHereTabs?.length > 0
+  const signHereTabs: any[] = prepTabs?.signHereTabs?.length > 0
     ? prepTabs.signHereTabs.map(cleanTab)
     : [];
-  const anchorDateTabs: any[] = prepTabs?.dateSignedTabs?.length > 0
+  const dateSignedTabs: any[] = prepTabs?.dateSignedTabs?.length > 0
     ? prepTabs.dateSignedTabs.map(cleanTab)
     : [];
 
-  // Merge: anchor tabs first (precise), coordinate tab last (guaranteed)
-  const signHereTabs = [...anchorSignTabs, coordSignTab];
-  const dateSignedTabs = [...anchorDateTabs, coordDateTab];
-
-  console.log(`[agreement-desk] Tabs: ${anchorSignTabs.length} anchor + 1 coord signHere, ${anchorDateTabs.length} anchor + 1 coord date`);
+  console.log(`[agreement-desk] Tabs from vision pipeline: ${signHereTabs.length} signHere, ${dateSignedTabs.length} date`);
 
   const docName = item.filename.endsWith(".pdf") ? item.filename : `${item.filename}.pdf`;
 
