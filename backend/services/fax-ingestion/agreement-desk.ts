@@ -80,14 +80,40 @@ async function getInboxEnvelopes(): Promise<any[]> {
   const accessToken = process.env.DOCUSIGN_ACCESS_TOKEN;
   if (!accessToken) throw new Error("No DOCUSIGN_ACCESS_TOKEN configured");
 
-  const response = await axios.get(
-    `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes`,
-    {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      params: { folder_ids: INBOX_FOLDER_ID, count: 50, start_position: 0 },
-    }
-  );
-  return response.data?.envelopes || [];
+  // Look back 90 days to catch all recent faxes
+  const fromDate = new Date();
+  fromDate.setDate(fromDate.getDate() - 90);
+  const fromDateStr = fromDate.toISOString().split("T")[0];
+
+  // Try folder-specific first, fall back to all envelopes if empty
+  const tryFetch = async (params: Record<string, any>) => {
+    const response = await axios.get(
+      `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, params }
+    );
+    return response.data?.envelopes || [];
+  };
+
+  // First: poll the specific Agreement Desk inbox folder
+  let envelopes = await tryFetch({
+    folder_ids: INBOX_FOLDER_ID,
+    from_date: fromDateStr,
+    count: 50,
+    start_position: 0,
+  });
+
+  // Fallback: if folder returns nothing new, also check all recent envelopes
+  // (catches faxes that may land in a different folder)
+  if (envelopes.length === 0) {
+    envelopes = await tryFetch({
+      from_date: fromDateStr,
+      count: 50,
+      start_position: 0,
+      status: "created,sent,delivered,signed,completed",
+    });
+  }
+
+  return envelopes;
 }
 
 async function downloadDocumentAsBase64(
