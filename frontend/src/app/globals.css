@@ -5,6 +5,11 @@
   --ds-purple-hover: #1e1038;
 }
 
+@keyframes shimmer {
+  0%   { background-position: 200% center; }
+  100% { background-position: -200% center; }
+}
+
 body {
   font-family: "Helvetica Neue", Arial, sans-serif;
   background: #ffffff;
