@@ -30,6 +30,8 @@ export interface X12_277_Result {
   serviceDate?: string;
   totalAmount?: number;
   interchangeDate?: string;
+  requestType?: string;        // IMAGING_REQUEST | NOTES_REQUEST | SIGNATURE_REQUEST | INFO_REQUEST
+  requestedServices?: string[]; // human-readable list of requested items (X-rays, MRI, etc.)
 }
 
 // Well-known payer IDs → display names (augmented with dummy names for demo)
@@ -187,6 +189,43 @@ export function parseX12_277(raw: string): X12_277_Result {
       const amt = parseFloat(seg[2] || "0");
       if (!isNaN(amt) && amt > 0) result.totalAmount = amt;
     }
+
+    // REF*ZZ — custom request type tag embedded in EDI
+    if (id === "REF" && seg[1]?.trim() === "ZZ") {
+      result.requestType = seg[2]?.trim();
+    }
+
+    // REF*EA — requested services (format: "LABEL:CODE1,CODE2")
+    if (id === "REF" && seg[1]?.trim() === "EA") {
+      const val = seg[2]?.trim() || "";
+      if (val.includes(":")) {
+        const [label, codes] = val.split(":");
+        const items = codes.split(",").map(c => `${label.replace(/-/g, " ")} (${c.trim()})`);
+        result.requestedServices = [...(result.requestedServices || []), ...items];
+      } else {
+        result.requestedServices = [...(result.requestedServices || []), val.replace(/-/g, " ")];
+      }
+    }
+
+    // LQ — line service codes (radiology CPT codes indicate imaging)
+    if (id === "LQ") {
+      const cptCode = seg[2]?.trim();
+      if (cptCode) {
+        const CPT_LABELS: Record<string, string> = {
+          "71046": "Chest X-Ray 2 views (CPT 71046)",
+          "71047": "Chest X-Ray 3 views (CPT 71047)",
+          "71048": "Chest X-Ray 4+ views (CPT 71048)",
+          "70553": "Brain MRI w/wo contrast (CPT 70553)",
+          "70450": "Head CT without contrast (CPT 70450)",
+          "72148": "Lumbar Spine MRI (CPT 72148)",
+          "73721": "Knee MRI (CPT 73721)",
+        };
+        const label = CPT_LABELS[cptCode] || `Service CPT ${cptCode}`;
+        if (!(result.requestedServices || []).includes(label)) {
+          result.requestedServices = [...(result.requestedServices || []), label];
+        }
+      }
+    }
   }
 
   return result;
@@ -203,12 +242,17 @@ export function build277Summary(parsed: X12_277_Result, rawLength: number): stri
 
   if (parsed.patient)  parts.push(`for patient ${parsed.patient}`);
   if (parsed.claimId)  parts.push(`(Claim #${parsed.claimId})`);
-
   parts.push(".");
 
   if (parsed.claimStatusDescription) {
     parts.push(` Status: ${parsed.claimStatusDescription}.`);
   }
+
+  // Include requested services if present
+  if (parsed.requestedServices && parsed.requestedServices.length > 0) {
+    parts.push(` Requested: ${parsed.requestedServices.join("; ")}.`);
+  }
+
   if (parsed.totalAmount) {
     parts.push(` Claim amount: $${parsed.totalAmount.toLocaleString()}.`);
   }

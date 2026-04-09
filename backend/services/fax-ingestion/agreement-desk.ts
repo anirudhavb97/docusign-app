@@ -81,6 +81,7 @@ export interface InboxItem {
   payer?: string;             // insurance payer (populated from HL7 277 or AI)
   sender?: string;            // submitter / clearing-house (populated from HL7 277)
   claimId?: string;           // claim reference number from HL7 277
+  hl7RequestType?: string;    // IMAGING_REQUEST | NOTES_REQUEST | SIGNATURE_REQUEST | INFO_REQUEST
   patientName?: string;       // patient name extracted from AI pipeline
   physicianName?: string;
   physicianEmail?: string;    // derived as firstname.lastname@hospital.com
@@ -422,9 +423,10 @@ export async function processHl7277(ediContent: string): Promise<InboxItem> {
     },
     summary,
     routingDepartment: "Medical Records / Claims",
-    payer:    parsed.payer,
-    sender:   parsed.sender,
-    claimId:  parsed.claimId,
+    payer:          parsed.payer,
+    sender:         parsed.sender,
+    claimId:        parsed.claimId,
+    hl7RequestType: parsed.requestType,
   };
 
   inboxItems.set(id, item);
