@@ -4,6 +4,7 @@ import {
   FileText, CheckCircle, AlertCircle, Clock, ExternalLink,
   Send, Loader2, Upload, X, Trash2, Database, ArrowLeftRight,
   RotateCcw, Pencil, RefreshCw, ChevronDown, ChevronRight,
+  Activity, Building2,
 } from "lucide-react";
 
 interface InboxItem {
@@ -11,7 +12,7 @@ interface InboxItem {
   filename: string;
   receivedAt: string;
   status: "processing" | "classified" | "envelope_created" | "signed" | "error";
-  source?: "docusign" | "upload";
+  source?: "docusign" | "upload" | "hl7_277";
   classification?: {
     bucket: string;
     label: string;
@@ -21,6 +22,9 @@ interface InboxItem {
   };
   summary?: string;
   routingDepartment?: string;
+  payer?: string;
+  sender?: string;
+  claimId?: string;
   physicianName?: string;
   physicianEmail?: string;
   draftEnvelopeId?: string;
@@ -33,6 +37,8 @@ interface Corrections {
   classificationLabel?: string;
   classificationBucket?: string;
   routingDepartment?: string;
+  payer?: string;
+  sender?: string;
 }
 
 const BUCKET_COLORS: Record<string, string> = {
@@ -46,7 +52,6 @@ const BUCKET_COLORS: Record<string, string> = {
   NO_SIGNATURE_REQUIRED:    "bg-gray-100 text-gray-500 border-gray-200",
 };
 
-// Left border accent color per bucket
 const BUCKET_ACCENT: Record<string, string> = {
   DME_ORDER:                "border-l-purple-400",
   HOME_HEALTH_ORDER:        "border-l-blue-400",
@@ -70,6 +75,27 @@ const BUCKET_OPTIONS = [
 ];
 
 const STEPS = ["Upload", "Classify", "Sig. Action", "Prepare", "Send"];
+
+// Sample 277 for the textarea placeholder
+const SAMPLE_277 = `ISA*00*          *00*          *ZZ*AETNA001       *ZZ*HOSPITAL01     *240115*1430*^*00501*000000001*0*P*:~
+GS*HN*AETNA001*HOSPITAL01*20240115*1430*1*X*005010X214~
+ST*277*0001~
+BHT*0010*08*TRN12345*20240115*1430~
+HL*1**20*1~
+NM1*PR*2*AETNA*****PI*AETNA001~
+HL*2*1*21*1~
+NM1*41*2*AVAILITY*****46*987654321~
+HL*3*2*22*0~
+NM1*1P*2*SMITH*JANE*MD***XX*1234567890~
+HL*4*3*PT*0~
+NM1*QC*1*DOE*JOHN****HN*MEM789012~
+TRN*1*CLM20240115001*1AETNA~
+STC*A1:20*20240115*WQ*2500.00~
+DTP*472*D8*20240110~
+AMT*T3*2500.00~
+SE*19*0001~
+GE*1*1~
+IEA*1*000000001~`;
 
 function getActiveStep(item: InboxItem): number {
   switch (item.status) {
@@ -109,8 +135,11 @@ export default function RequestsPage() {
   const [toast, setToast]             = useState<{ msg: string; type: "success" | "error" } | null>(null);
   const [corrections, setCorrections] = useState<Record<string, Corrections>>({});
   const [editingField, setEditingField] = useState<{ id: string; field: string } | null>(null);
-  // Expanded state for collapsed (already-processed) items
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [expandedIds, setExpandedIds]   = useState<Set<string>>(new Set());
+  // HL7 277 input state
+  const [hl7Content, setHl7Content]   = useState("");
+  const [hl7Tab, setHl7Tab]           = useState(false); // show HL7 input panel
+  const [submittingHl7, setSubmittingHl7] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function showToast(msg: string, type: "success" | "error") {
@@ -147,6 +176,8 @@ export default function RequestsPage() {
     if (field === "classificationLabel")  return item.classification?.label || "";
     if (field === "classificationBucket") return item.classification?.bucket || "";
     if (field === "routingDepartment")    return item.routingDepartment || "";
+    if (field === "payer")                return item.payer || "";
+    if (field === "sender")               return item.sender || "";
     return "";
   }
 
@@ -194,6 +225,30 @@ export default function RequestsPage() {
     if (file) handleUpload(file);
   }
 
+  async function handleSubmitHl7() {
+    const content = hl7Content.trim();
+    if (!content) { showToast("Paste an X12 277 EDI message first.", "error"); return; }
+    if (!content.startsWith("ISA")) { showToast("Content must start with ISA — not a valid X12 EDI message.", "error"); return; }
+    setSubmittingHl7(true);
+    try {
+      const res = await fetch("/api/fax?path=ingest-hl7", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ediContent: content }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Ingestion failed");
+      showToast("HL7 277 ingested successfully", "success");
+      setHl7Content("");
+      setHl7Tab(false);
+      loadItems();
+    } catch (e: any) {
+      showToast(e.message, "error");
+    } finally {
+      setSubmittingHl7(false);
+    }
+  }
+
   function handleDelete(id: string, e?: React.MouseEvent) {
     e?.stopPropagation();
     setDeleting(id);
@@ -236,14 +291,13 @@ export default function RequestsPage() {
   function handleSendToPayer(id: string) {
     setActioning(id);
     fetch(`/api/fax?path=send-to-payer/${id}`, { method: "POST" })
-      .then(() => showToast("Signed document sent back to payer", "success"))
+      .then(() => showToast("Response sent to payer", "success"))
       .catch(err => showToast(err.message, "error"))
       .finally(() => setActioning(null));
   }
 
-  // Split items: processing ones shown as active cards, rest as collapsible rows
-  const processingItems  = items.filter(i => i.status === "processing");
-  const processedItems   = items.filter(i => i.status !== "processing");
+  const processingItems = items.filter(i => i.status === "processing");
+  const processedItems  = items.filter(i => i.status !== "processing");
 
   return (
     <div className="max-w-5xl mx-auto pb-12">
@@ -259,7 +313,7 @@ export default function RequestsPage() {
         </div>
       )}
 
-      {/* Page header */}
+      {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Agreement Desk</h1>
@@ -275,56 +329,118 @@ export default function RequestsPage() {
         </button>
       </div>
 
-      {/* ── Upload hero ─────────────────────────────────────────────────── */}
-      <div
-        onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={handleDrop}
-        onClick={() => !uploading && fileInputRef.current?.click()}
-        className={`relative cursor-pointer rounded-2xl border-2 border-dashed transition-all duration-200 mb-8 overflow-hidden ${
-          dragOver
-            ? "border-[#26154a] scale-[1.01]"
-            : "border-gray-200 hover:border-[#26154a]"
-        }`}
-      >
-        {/* Gradient background */}
-        <div className="absolute inset-0 bg-gradient-to-br from-purple-50 via-white to-indigo-50 opacity-70"/>
-        <div className="relative flex flex-col items-center justify-center py-10 px-6 text-center">
-          {uploading ? (
-            <>
-              <div className="w-14 h-14 rounded-full bg-purple-100 flex items-center justify-center mb-4 ring-4 ring-purple-50">
-                <Loader2 size={24} className="text-[#26154a] animate-spin"/>
-              </div>
-              <p className="font-semibold text-[#26154a]">Uploading & starting AI pipeline…</p>
-              <p className="text-sm text-gray-400 mt-1">OCR → classify → envelope prep</p>
-            </>
-          ) : (
-            <>
-              <div className={`w-14 h-14 rounded-full flex items-center justify-center mb-4 ring-4 transition-colors ${
-                dragOver ? "bg-[#26154a] ring-purple-200" : "bg-white ring-purple-50 shadow-sm"
-              }`}>
-                <Upload size={22} className={dragOver ? "text-white" : "text-[#26154a]"}/>
-              </div>
-              <p className="font-semibold text-gray-800 mb-1">
-                {dragOver ? "Drop to upload" : "Drop a PDF or click to upload"}
-              </p>
-              <p className="text-sm text-gray-400 mb-5">AI classifies, extracts, and prepares the envelope automatically</p>
-              <div className="flex items-center gap-3 text-xs text-gray-400">
-                <span className="w-10 h-px bg-gray-200"/>
-                or email to
-                <span className="w-10 h-px bg-gray-200"/>
-              </div>
-              <p className="mt-2 font-mono text-xs bg-white/80 border border-gray-200 px-3 py-1.5 rounded-lg text-[#26154a] shadow-sm">
-                jane-goodwin-co-part-11@mail31.demo.docusign.net
-              </p>
-            </>
-          )}
+      {/* ── Upload / Intake hero ─────────────────────────────────────────── */}
+      <div className="rounded-2xl border border-gray-200 shadow-sm overflow-hidden mb-8">
+
+        {/* Tab bar */}
+        <div className="flex border-b border-gray-100 bg-gray-50">
+          <button
+            onClick={() => setHl7Tab(false)}
+            className={`flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
+              !hl7Tab ? "border-[#26154a] text-[#26154a] bg-white" : "border-transparent text-gray-400 hover:text-gray-600"
+            }`}
+          >
+            <Upload size={14}/> PDF / Document
+          </button>
+          <button
+            onClick={() => setHl7Tab(true)}
+            className={`flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
+              hl7Tab ? "border-[#26154a] text-[#26154a] bg-white" : "border-transparent text-gray-400 hover:text-gray-600"
+            }`}
+          >
+            <Activity size={14}/> HL7 X12 277
+          </button>
         </div>
+
+        {/* PDF upload panel */}
+        {!hl7Tab && (
+          <div
+            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={handleDrop}
+            onClick={() => !uploading && fileInputRef.current?.click()}
+            className={`relative cursor-pointer transition-all duration-200 ${
+              dragOver ? "bg-purple-50" : "bg-white hover:bg-gray-50/60"
+            }`}
+          >
+            <div className="flex flex-col items-center justify-center py-10 px-6 text-center">
+              {uploading ? (
+                <>
+                  <div className="w-12 h-12 rounded-full bg-purple-100 flex items-center justify-center mb-3">
+                    <Loader2 size={22} className="text-[#26154a] animate-spin"/>
+                  </div>
+                  <p className="font-semibold text-[#26154a]">Uploading & starting AI pipeline…</p>
+                </>
+              ) : (
+                <>
+                  <div className={`w-12 h-12 rounded-full flex items-center justify-center mb-3 transition-colors ${
+                    dragOver ? "bg-[#26154a]" : "bg-purple-50 border border-purple-100"
+                  }`}>
+                    <Upload size={20} className={dragOver ? "text-white" : "text-[#26154a]"}/>
+                  </div>
+                  <p className="font-semibold text-gray-800 mb-1">
+                    {dragOver ? "Drop to upload" : "Drop a PDF or click to upload"}
+                  </p>
+                  <p className="text-sm text-gray-400 mb-4">AI classifies, extracts, and prepares the envelope automatically</p>
+                  <div className="flex items-center gap-3 text-xs text-gray-400 mb-2">
+                    <span className="w-10 h-px bg-gray-200"/> or email directly to <span className="w-10 h-px bg-gray-200"/>
+                  </div>
+                  <p className="font-mono text-xs bg-gray-50 border border-gray-200 px-3 py-1.5 rounded-lg text-[#26154a]">
+                    jane-goodwin-co-part-11@mail31.demo.docusign.net
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* HL7 277 input panel */}
+        {hl7Tab && (
+          <div className="bg-white p-6">
+            <div className="flex items-start gap-4 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center shrink-0">
+                <Activity size={18} className="text-indigo-500"/>
+              </div>
+              <div>
+                <p className="font-semibold text-gray-800 text-sm">Submit an HL7 X12 277</p>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Paste a raw X12 EDI 277 Health Care Information Status Notification. No document attachment required —
+                  payer, sender, and claim details are decoded automatically and classified as a Medical Record Request.
+                </p>
+              </div>
+            </div>
+            <textarea
+              value={hl7Content}
+              onChange={e => setHl7Content(e.target.value)}
+              placeholder={SAMPLE_277}
+              rows={8}
+              className="w-full font-mono text-xs border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-300 bg-gray-50 text-gray-700 resize-none placeholder:text-gray-300"
+            />
+            <div className="flex items-center justify-between mt-3">
+              <p className="text-xs text-gray-400">Must start with <code className="bg-gray-100 px-1 rounded">ISA</code> — X12 5010 format</p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setHl7Content(SAMPLE_277)}
+                  className="text-xs text-gray-400 hover:text-gray-600 px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+                >
+                  Load sample
+                </button>
+                <button
+                  onClick={handleSubmitHl7}
+                  disabled={submittingHl7 || !hl7Content.trim()}
+                  className="flex items-center gap-1.5 bg-indigo-600 text-white text-xs font-semibold px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                >
+                  {submittingHl7 ? <><Loader2 size={12} className="animate-spin"/> Ingesting…</> : <><Activity size={12}/> Ingest 277</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <input ref={fileInputRef} type="file" accept=".pdf,application/pdf" className="hidden" onChange={handleFileInput}/>
 
-      {/* ── Loading skeleton ─────────────────────────────────────────────── */}
+      {/* Loading skeleton */}
       {loading && (
         <div className="space-y-3">
           {[1, 2, 3].map(i => (
@@ -342,16 +458,13 @@ export default function RequestsPage() {
         </div>
       )}
 
-      {/* ── Active / processing cards ────────────────────────────────────── */}
+      {/* ── Processing / active cards ────────────────────────────────────── */}
       {!loading && processingItems.length > 0 && (
         <div className="space-y-4 mb-6">
           {processingItems.map(item => (
             <div key={item.id} className="bg-white rounded-2xl border-2 border-blue-100 shadow-sm overflow-hidden">
-              {/* Animated top bar */}
               <div className="h-1 bg-gradient-to-r from-[#26154a] via-blue-400 to-[#26154a] bg-[length:200%_100%] animate-[shimmer_2s_linear_infinite]"/>
-
               <div className="px-6 py-5">
-                {/* Header */}
                 <div className="flex items-center justify-between mb-5">
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 rounded-xl bg-blue-50 flex items-center justify-center">
@@ -366,12 +479,10 @@ export default function RequestsPage() {
                     <Loader2 size={10} className="animate-spin"/> Processing
                   </span>
                 </div>
-
-                {/* Progress steps */}
                 <div className="flex items-center">
                   {STEPS.map((step, idx) => {
-                    const done   = 1 > idx;   // Upload is always done
-                    const active = idx === 1;  // Classify is active
+                    const done = idx === 0;
+                    const active = idx === 1;
                     return (
                       <div key={step} className="flex items-center flex-1 last:flex-none">
                         <div className="flex flex-col items-center">
@@ -382,179 +493,165 @@ export default function RequestsPage() {
                           }`}>
                             {done ? <CheckCircle size={14}/> : active ? <Loader2 size={11} className="animate-spin"/> : idx + 1}
                           </div>
-                          <span className={`text-[10px] mt-1 font-medium whitespace-nowrap ${
-                            done || active ? "text-[#26154a]" : "text-gray-300"
-                          }`}>{step}</span>
+                          <span className={`text-[10px] mt-1 font-medium whitespace-nowrap ${done || active ? "text-[#26154a]" : "text-gray-300"}`}>{step}</span>
                         </div>
-                        {idx < STEPS.length - 1 && (
-                          <div className={`h-0.5 flex-1 mx-1 mb-4 rounded-full ${done ? "bg-[#26154a]" : "bg-gray-200"}`}/>
-                        )}
+                        {idx < STEPS.length - 1 && <div className={`h-0.5 flex-1 mx-1 mb-4 rounded-full ${done ? "bg-[#26154a]" : "bg-gray-200"}`}/>}
                       </div>
                     );
                   })}
                 </div>
-
-                <p className="text-xs text-blue-500 mt-3">
-                  Running OCR → classification → envelope prep…
-                </p>
+                <p className="text-xs text-blue-500 mt-3">Running OCR → classification → envelope prep…</p>
               </div>
             </div>
           ))}
         </div>
       )}
 
-      {/* ── Processed items (collapsible rows) ──────────────────────────── */}
+      {/* ── Processed items table ────────────────────────────────────────── */}
       {!loading && processedItems.length > 0 && (
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-          {/* Section header */}
           {processingItems.length > 0 && (
-            <div className="px-5 py-2.5 bg-gray-50 border-b border-gray-100 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+            <div className="px-5 py-2 bg-gray-50 border-b border-gray-100 text-xs font-semibold text-gray-400 uppercase tracking-wider">
               Processed — {processedItems.length} document{processedItems.length !== 1 ? "s" : ""}
             </div>
           )}
 
-          {processedItems.map((item, idx) => {
+          {/* Column headers */}
+          <div className="hidden md:grid grid-cols-[20px_2fr_1.5fr_1fr_1fr_auto] gap-3 px-5 py-2 bg-gray-50/80 border-b border-gray-100 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
+            <span/>
+            <span>Document</span>
+            <span>Classification</span>
+            <span>Payer / Sender</span>
+            <span>Sig.</span>
+            <span>Action</span>
+          </div>
+
+          {processedItems.map(item => {
             const isExpanded = expandedIds.has(item.id);
             const bucket     = getField(item, "classificationBucket") || item.classification?.bucket || "";
             const label      = getField(item, "classificationLabel")  || item.classification?.label  || "";
             const physician  = getField(item, "physicianName");
             const department = getField(item, "routingDepartment");
+            const payer      = getField(item, "payer");
+            const sender     = getField(item, "sender");
             const corrected  = hasCorrections(item.id);
             const needsSig   = item.classification?.needsSignature;
             const accentCls  = BUCKET_ACCENT[bucket] || "border-l-gray-200";
             const activeStep = getActiveStep(item);
+            const isHl7      = item.source === "hl7_277";
 
             return (
-              <div
-                key={item.id}
-                className={`border-b border-gray-100 last:border-0 border-l-4 ${accentCls} transition-colors`}
-              >
-                {/* ── Collapsed row ── */}
+              <div key={item.id} className={`border-b border-gray-100 last:border-0 border-l-4 ${accentCls}`}>
+
+                {/* Collapsed row */}
                 <div
-                  className="flex items-center gap-3 px-5 py-3.5 cursor-pointer hover:bg-gray-50/80 transition-colors"
+                  className="grid grid-cols-[20px_2fr_1.5fr_1fr_1fr_auto] gap-3 items-center px-5 py-3.5 cursor-pointer hover:bg-gray-50/70 transition-colors"
                   onClick={() => toggleExpanded(item.id)}
                 >
-                  {/* Expand caret */}
-                  <div className="text-gray-300 shrink-0">
+                  {/* Caret */}
+                  <div className="text-gray-300">
                     {isExpanded
-                      ? <ChevronDown size={15} className="text-[#26154a]"/>
-                      : <ChevronRight size={15}/>}
+                      ? <ChevronDown size={14} className="text-[#26154a]"/>
+                      : <ChevronRight size={14}/>}
                   </div>
 
-                  {/* Filename */}
-                  <div className="flex items-center gap-2 min-w-0 flex-[2]">
-                    <FileText size={14} className="text-gray-300 shrink-0"/>
-                    <span className="text-sm font-medium text-gray-800 truncate">{item.filename}</span>
-                    {corrected && (
-                      <span className="text-[10px] bg-amber-100 text-amber-600 px-1.5 py-0.5 rounded-full font-medium shrink-0">edited</span>
-                    )}
+                  {/* Filename + source badge */}
+                  <div className="flex items-center gap-2 min-w-0">
+                    {isHl7
+                      ? <Activity size={13} className="text-indigo-400 shrink-0"/>
+                      : <FileText size={13} className="text-gray-300 shrink-0"/>}
+                    <div className="min-w-0">
+                      <span className="text-sm font-medium text-gray-800 truncate block">{item.filename}</span>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <span className="text-[10px] text-gray-400">{formatDate(item.receivedAt)}</span>
+                        {isHl7 && <span className="text-[10px] bg-indigo-50 text-indigo-500 px-1.5 py-px rounded-full font-medium">HL7 277</span>}
+                        {corrected && <span className="text-[10px] bg-amber-100 text-amber-600 px-1.5 py-px rounded-full font-medium">edited</span>}
+                      </div>
+                    </div>
                   </div>
 
-                  {/* Classification badge */}
-                  <div className="flex-[1.5] flex items-center gap-2">
+                  {/* Classification */}
+                  <div className="flex items-center gap-2">
                     {item.status === "error" ? (
                       <span className="text-xs text-red-500 flex items-center gap-1"><AlertCircle size={12}/> Error</span>
                     ) : item.classification ? (
                       <>
-                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${BUCKET_COLORS[bucket] || "bg-gray-100 text-gray-500 border-gray-200"}`}>
+                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border whitespace-nowrap ${BUCKET_COLORS[bucket] || "bg-gray-100 text-gray-500 border-gray-200"}`}>
                           {label}
                         </span>
-                        <span className="text-xs text-gray-400 shrink-0">
-                          {item.classification.confidence}%
-                        </span>
+                        <span className="text-xs text-gray-400 shrink-0">{item.classification.confidence}%</span>
                       </>
                     ) : null}
                   </div>
 
-                  {/* Department */}
-                  <div className="flex-1 hidden md:block">
-                    {department ? (
-                      <span className="text-xs text-indigo-600 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full font-medium truncate block max-w-[120px]">
-                        {department}
-                      </span>
+                  {/* Payer / Sender */}
+                  <div className="min-w-0">
+                    {payer ? (
+                      <div>
+                        <p className="text-xs font-medium text-gray-700 truncate flex items-center gap-1">
+                          <Building2 size={10} className="text-gray-400 shrink-0"/>
+                          {payer}
+                        </p>
+                        {sender && <p className="text-[10px] text-gray-400 truncate ml-3.5">{sender}</p>}
+                      </div>
                     ) : (
                       <span className="text-xs text-gray-300">—</span>
                     )}
                   </div>
 
-                  {/* Physician */}
-                  <div className="flex-1 hidden lg:block min-w-0">
-                    <p className="text-xs text-gray-600 truncate">{physician || "—"}</p>
-                  </div>
-
-                  {/* Signature status */}
+                  {/* Signature */}
                   <div className="shrink-0">
                     {item.status === "signed" ? (
-                      <span className="flex items-center gap-1 text-xs font-medium text-green-600">
-                        <CheckCircle size={12}/> Signed
-                      </span>
+                      <span className="flex items-center gap-1 text-xs font-medium text-green-600"><CheckCircle size={12}/> Signed</span>
                     ) : needsSig ? (
-                      <span className="flex items-center gap-1 text-xs font-medium text-orange-500">
-                        <Clock size={12}/> Sig. required
-                      </span>
+                      <span className="flex items-center gap-1 text-xs font-medium text-orange-500"><Clock size={12}/> Required</span>
                     ) : (
-                      <span className="flex items-center gap-1 text-xs text-gray-400">
-                        <CheckCircle size={12}/> No sig. needed
-                      </span>
+                      <span className="flex items-center gap-1 text-xs text-gray-400"><CheckCircle size={12}/> Not needed</span>
                     )}
                   </div>
 
-                  {/* Quick action */}
-                  <div className="shrink-0 flex items-center gap-1.5 ml-2" onClick={e => e.stopPropagation()}>
+                  {/* Actions */}
+                  <div className="flex items-center gap-1.5 shrink-0" onClick={e => e.stopPropagation()}>
                     {item.status === "classified" && needsSig && (
-                      <button
-                        onClick={() => handleCreateEnvelope(item)}
-                        disabled={creating === item.id}
-                        className="flex items-center gap-1 bg-[#26154a] text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-[#3a2060] disabled:opacity-60 transition-colors"
-                      >
+                      <button onClick={() => handleCreateEnvelope(item)} disabled={creating === item.id}
+                        className="flex items-center gap-1 bg-[#26154a] text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-[#3a2060] disabled:opacity-60 transition-colors">
                         {creating === item.id ? <><Loader2 size={11} className="animate-spin"/> Creating…</> : <><Send size={11}/> Envelope</>}
                       </button>
                     )}
                     {item.status === "classified" && !needsSig && (
-                      <button
-                        onClick={() => handleSendToEhr(item.id)}
-                        disabled={actioning === item.id}
-                        className="flex items-center gap-1 bg-teal-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-teal-700 disabled:opacity-60 transition-colors"
-                      >
+                      <button onClick={e => handleSendToEhr(item.id, e)} disabled={actioning === item.id}
+                        className="flex items-center gap-1 bg-teal-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-teal-700 disabled:opacity-60 transition-colors">
                         {actioning === item.id ? <><Loader2 size={11} className="animate-spin"/> Sending…</> : <><Database size={11}/> EHR</>}
                       </button>
                     )}
                     {item.status === "envelope_created" && item.draftEnvelopeId && (
-                      <a
-                        href={`https://apps-d.docusign.com/send/prepare/${item.draftEnvelopeId}`}
+                      <a href={`https://apps-d.docusign.com/send/prepare/${item.draftEnvelopeId}`}
                         target="_blank" rel="noopener noreferrer"
-                        className="flex items-center gap-1 text-xs font-semibold text-blue-600 border border-blue-200 px-3 py-1.5 rounded-lg hover:bg-blue-50 transition-colors"
-                      >
+                        className="flex items-center gap-1 text-xs font-semibold text-blue-600 border border-blue-200 px-3 py-1.5 rounded-lg hover:bg-blue-50 transition-colors">
                         <ExternalLink size={11}/> DocuSign
                       </a>
                     )}
                     {item.status === "signed" && (
-                      <button
-                        onClick={() => handleSendToPayer(item.id)}
-                        disabled={actioning === item.id}
-                        className="flex items-center gap-1 bg-blue-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-blue-700 disabled:opacity-60 transition-colors"
-                      >
+                      <button onClick={() => handleSendToPayer(item.id)} disabled={actioning === item.id}
+                        className="flex items-center gap-1 bg-blue-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-blue-700 disabled:opacity-60 transition-colors">
                         <ArrowLeftRight size={11}/> Payer
                       </button>
                     )}
-                    <button
-                      onClick={() => handleDelete(item.id)}
-                      disabled={deleting === item.id}
-                      className="p-1.5 text-gray-300 hover:text-red-400 hover:bg-red-50 rounded-lg transition-colors"
-                    >
+                    <button onClick={e => handleDelete(item.id, e)} disabled={deleting === item.id}
+                      className="p-1.5 text-gray-300 hover:text-red-400 hover:bg-red-50 rounded-lg transition-colors">
                       {deleting === item.id ? <Loader2 size={12} className="animate-spin"/> : <Trash2 size={12}/>}
                     </button>
                   </div>
                 </div>
 
-                {/* ── Expanded panel ── */}
+                {/* Expanded panel */}
                 {isExpanded && (
-                  <div className="px-6 pb-5 pt-1 bg-gray-50/60 border-t border-gray-100">
+                  <div className="px-6 pb-5 pt-2 bg-gray-50/50 border-t border-gray-100">
 
                     {/* Progress bar */}
                     <div className="flex items-center mb-5 mt-3">
                       {STEPS.map((step, i) => {
-                        const done   = activeStep > i;
+                        const done = activeStep > i;
                         const active = activeStep === i;
                         return (
                           <div key={step} className="flex items-center flex-1 last:flex-none">
@@ -566,13 +663,9 @@ export default function RequestsPage() {
                               }`}>
                                 {done ? <CheckCircle size={12}/> : i + 1}
                               </div>
-                              <span className={`text-[10px] mt-1 font-medium whitespace-nowrap ${
-                                done || active ? "text-[#26154a]" : "text-gray-300"
-                              }`}>{step}</span>
+                              <span className={`text-[10px] mt-1 font-medium whitespace-nowrap ${done || active ? "text-[#26154a]" : "text-gray-300"}`}>{step}</span>
                             </div>
-                            {i < STEPS.length - 1 && (
-                              <div className={`h-0.5 flex-1 mx-1 mb-4 rounded-full ${done ? "bg-[#26154a]" : "bg-gray-200"}`}/>
-                            )}
+                            {i < STEPS.length - 1 && <div className={`h-0.5 flex-1 mx-1 mb-4 rounded-full ${done ? "bg-[#26154a]" : "bg-gray-200"}`}/>}
                           </div>
                         );
                       })}
@@ -581,13 +674,19 @@ export default function RequestsPage() {
                     {/* AI Summary */}
                     {item.summary && (
                       <div className="bg-white border border-purple-100 rounded-xl px-4 py-3 mb-4">
-                        <p className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider mb-1">AI Summary</p>
+                        <p className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider mb-1">
+                          {isHl7 ? "HL7 Decoded Summary" : "AI Summary"}
+                        </p>
                         <p className="text-sm text-gray-600 leading-relaxed">{item.summary}</p>
+                        {item.claimId && (
+                          <p className="text-xs text-gray-400 mt-1.5 font-mono">Claim # {item.claimId}</p>
+                        )}
                       </div>
                     )}
 
-                    {/* Editable fields grid */}
+                    {/* Editable fields */}
                     <div className="grid grid-cols-2 gap-x-6 gap-y-3 mb-4">
+
                       {/* Classification */}
                       <div>
                         <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Classification</label>
@@ -596,16 +695,11 @@ export default function RequestsPage() {
                             value={bucket}
                             onChange={e => {
                               const opt = BUCKET_OPTIONS.find(o => o.id === e.target.value);
-                              if (opt) {
-                                applyCorrection(item.id, "classificationBucket", opt.id);
-                                applyCorrection(item.id, "classificationLabel", opt.label);
-                              }
+                              if (opt) { applyCorrection(item.id, "classificationBucket", opt.id); applyCorrection(item.id, "classificationLabel", opt.label); }
                             }}
                             className="w-full text-xs font-semibold pl-2 pr-7 py-1.5 rounded-lg border border-gray-200 bg-white appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-purple-300"
                           >
-                            {BUCKET_OPTIONS.map(o => (
-                              <option key={o.id} value={o.id}>{o.label}</option>
-                            ))}
+                            {BUCKET_OPTIONS.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
                           </select>
                           <ChevronDown size={11} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"/>
                         </div>
@@ -615,60 +709,80 @@ export default function RequestsPage() {
                       <div>
                         <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Route to Department</label>
                         {editingField?.id === item.id && editingField?.field === "routingDepartment" ? (
-                          <input
-                            autoFocus
-                            type="text"
-                            defaultValue={department}
+                          <input autoFocus type="text" defaultValue={department}
                             onBlur={e => { applyCorrection(item.id, "routingDepartment", e.target.value); setEditingField(null); }}
                             onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingField(null); }}
-                            className="w-full text-xs px-2 py-1.5 rounded-lg border border-purple-300 bg-white focus:outline-none focus:ring-2 focus:ring-purple-300"
-                          />
+                            className="w-full text-xs px-2 py-1.5 rounded-lg border border-purple-300 bg-white focus:outline-none focus:ring-2 focus:ring-purple-300"/>
                         ) : (
-                          <button
-                            onClick={() => setEditingField({ id: item.id, field: "routingDepartment" })}
-                            className="w-full text-left flex items-center justify-between gap-1 text-xs px-2 py-1.5 rounded-lg border border-gray-200 bg-white hover:border-purple-300 hover:bg-purple-50/30 transition-colors group"
-                          >
-                            <span className={department ? "text-gray-700" : "text-gray-400 italic"}>
-                              {department || "Click to set department"}
-                            </span>
+                          <button onClick={() => setEditingField({ id: item.id, field: "routingDepartment" })}
+                            className="w-full text-left flex items-center justify-between gap-1 text-xs px-2 py-1.5 rounded-lg border border-gray-200 bg-white hover:border-purple-300 transition-colors group">
+                            <span className={department ? "text-gray-700" : "text-gray-400 italic"}>{department || "Click to set"}</span>
                             <Pencil size={10} className="text-gray-300 group-hover:text-purple-400 shrink-0"/>
                           </button>
                         )}
                       </div>
 
-                      {/* Physician */}
+                      {/* Payer */}
                       <div>
-                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Ordering Physician</label>
-                        {editingField?.id === item.id && editingField?.field === "physicianName" ? (
-                          <input
-                            autoFocus
-                            type="text"
-                            defaultValue={physician}
-                            onBlur={e => {
-                              const name = e.target.value;
-                              applyCorrection(item.id, "physicianName", name);
-                              if (!corrections[item.id]?.physicianEmail) applyCorrection(item.id, "physicianEmail", deriveEmail(name));
-                              setEditingField(null);
-                            }}
+                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Payer</label>
+                        {editingField?.id === item.id && editingField?.field === "payer" ? (
+                          <input autoFocus type="text" defaultValue={payer}
+                            onBlur={e => { applyCorrection(item.id, "payer", e.target.value); setEditingField(null); }}
                             onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingField(null); }}
-                            className="w-full text-xs px-2 py-1.5 rounded-lg border border-purple-300 bg-white focus:outline-none focus:ring-2 focus:ring-purple-300"
-                          />
+                            className="w-full text-xs px-2 py-1.5 rounded-lg border border-purple-300 bg-white focus:outline-none focus:ring-2 focus:ring-purple-300"/>
                         ) : (
-                          <button
-                            onClick={() => setEditingField({ id: item.id, field: "physicianName" })}
-                            className="w-full text-left flex items-center justify-between gap-1 text-xs px-2 py-1.5 rounded-lg border border-gray-200 bg-white hover:border-purple-300 hover:bg-purple-50/30 transition-colors group"
-                          >
-                            <span className={physician ? "text-gray-700" : "text-gray-400 italic"}>
-                              {physician || "Unknown physician"}
-                            </span>
+                          <button onClick={() => setEditingField({ id: item.id, field: "payer" })}
+                            className="w-full text-left flex items-center justify-between gap-1 text-xs px-2 py-1.5 rounded-lg border border-gray-200 bg-white hover:border-purple-300 transition-colors group">
+                            <span className={payer ? "text-gray-700" : "text-gray-400 italic"}>{payer || "Unknown payer"}</span>
                             <Pencil size={10} className="text-gray-300 group-hover:text-purple-400 shrink-0"/>
                           </button>
                         )}
                       </div>
 
-                      {/* Signature */}
+                      {/* Sender */}
                       <div>
-                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Signature Status</label>
+                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Sender / Submitter</label>
+                        {editingField?.id === item.id && editingField?.field === "sender" ? (
+                          <input autoFocus type="text" defaultValue={sender}
+                            onBlur={e => { applyCorrection(item.id, "sender", e.target.value); setEditingField(null); }}
+                            onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingField(null); }}
+                            className="w-full text-xs px-2 py-1.5 rounded-lg border border-purple-300 bg-white focus:outline-none focus:ring-2 focus:ring-purple-300"/>
+                        ) : (
+                          <button onClick={() => setEditingField({ id: item.id, field: "sender" })}
+                            className="w-full text-left flex items-center justify-between gap-1 text-xs px-2 py-1.5 rounded-lg border border-gray-200 bg-white hover:border-purple-300 transition-colors group">
+                            <span className={sender ? "text-gray-700" : "text-gray-400 italic"}>{sender || "Unknown sender"}</span>
+                            <Pencil size={10} className="text-gray-300 group-hover:text-purple-400 shrink-0"/>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Physician (only for non-HL7) */}
+                      {!isHl7 && (
+                        <div>
+                          <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Ordering Physician</label>
+                          {editingField?.id === item.id && editingField?.field === "physicianName" ? (
+                            <input autoFocus type="text" defaultValue={physician}
+                              onBlur={e => {
+                                const name = e.target.value;
+                                applyCorrection(item.id, "physicianName", name);
+                                if (!corrections[item.id]?.physicianEmail) applyCorrection(item.id, "physicianEmail", deriveEmail(name));
+                                setEditingField(null);
+                              }}
+                              onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingField(null); }}
+                              className="w-full text-xs px-2 py-1.5 rounded-lg border border-purple-300 bg-white focus:outline-none focus:ring-2 focus:ring-purple-300"/>
+                          ) : (
+                            <button onClick={() => setEditingField({ id: item.id, field: "physicianName" })}
+                              className="w-full text-left flex items-center justify-between gap-1 text-xs px-2 py-1.5 rounded-lg border border-gray-200 bg-white hover:border-purple-300 transition-colors group">
+                              <span className={physician ? "text-gray-700" : "text-gray-400 italic"}>{physician || "Unknown physician"}</span>
+                              <Pencil size={10} className="text-gray-300 group-hover:text-purple-400 shrink-0"/>
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Signature status */}
+                      <div>
+                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Signature</label>
                         <div className="flex items-center gap-1.5 text-xs px-2 py-1.5">
                           {item.status === "signed" ? (
                             <><CheckCircle size={13} className="text-green-500"/><span className="text-green-600 font-medium">Signed</span></>
@@ -681,49 +795,35 @@ export default function RequestsPage() {
                       </div>
                     </div>
 
-                    {/* Actions + Undo */}
+                    {/* Action row */}
                     <div className="flex items-center gap-2 pt-3 border-t border-gray-200">
                       {item.status === "classified" && needsSig && (
-                        <button
-                          onClick={() => handleCreateEnvelope(item)}
-                          disabled={creating === item.id}
-                          className="flex items-center gap-1.5 bg-[#26154a] text-white text-xs font-semibold px-4 py-2 rounded-lg hover:bg-[#3a2060] disabled:opacity-60 transition-colors"
-                        >
+                        <button onClick={() => handleCreateEnvelope(item)} disabled={creating === item.id}
+                          className="flex items-center gap-1.5 bg-[#26154a] text-white text-xs font-semibold px-4 py-2 rounded-lg hover:bg-[#3a2060] disabled:opacity-60 transition-colors">
                           {creating === item.id ? <><Loader2 size={12} className="animate-spin"/> Creating…</> : <><Send size={12}/> Create Envelope</>}
                         </button>
                       )}
                       {item.status === "classified" && !needsSig && (
-                        <button
-                          onClick={() => handleSendToEhr(item.id)}
-                          disabled={actioning === item.id}
-                          className="flex items-center gap-1.5 bg-teal-600 text-white text-xs font-semibold px-4 py-2 rounded-lg hover:bg-teal-700 disabled:opacity-60 transition-colors"
-                        >
+                        <button onClick={() => handleSendToEhr(item.id)} disabled={actioning === item.id}
+                          className="flex items-center gap-1.5 bg-teal-600 text-white text-xs font-semibold px-4 py-2 rounded-lg hover:bg-teal-700 disabled:opacity-60 transition-colors">
                           {actioning === item.id ? <><Loader2 size={12} className="animate-spin"/> Sending…</> : <><Database size={12}/> Send to EHR</>}
                         </button>
                       )}
                       {item.status === "envelope_created" && item.draftEnvelopeId && (
-                        <a
-                          href={`https://apps-d.docusign.com/send/prepare/${item.draftEnvelopeId}`}
-                          target="_blank" rel="noopener noreferrer"
-                          className="flex items-center gap-1.5 text-xs font-semibold text-blue-600 border border-blue-200 px-4 py-2 rounded-lg hover:bg-blue-50 transition-colors"
-                        >
+                        <a href={`https://apps-d.docusign.com/send/prepare/${item.draftEnvelopeId}`} target="_blank" rel="noopener noreferrer"
+                          className="flex items-center gap-1.5 text-xs font-semibold text-blue-600 border border-blue-200 px-4 py-2 rounded-lg hover:bg-blue-50 transition-colors">
                           <ExternalLink size={12}/> View in DocuSign
                         </a>
                       )}
                       {item.status === "signed" && (
-                        <button
-                          onClick={() => handleSendToPayer(item.id)}
-                          disabled={actioning === item.id}
-                          className="flex items-center gap-1.5 bg-blue-600 text-white text-xs font-semibold px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-60 transition-colors"
-                        >
+                        <button onClick={() => handleSendToPayer(item.id)} disabled={actioning === item.id}
+                          className="flex items-center gap-1.5 bg-blue-600 text-white text-xs font-semibold px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-60 transition-colors">
                           <ArrowLeftRight size={12}/> Send to Payer
                         </button>
                       )}
                       {corrected && (
-                        <button
-                          onClick={() => undoCorrections(item.id)}
-                          className="flex items-center gap-1.5 text-xs font-medium text-amber-500 hover:text-amber-600 px-3 py-2 rounded-lg hover:bg-amber-50 transition-colors ml-auto"
-                        >
+                        <button onClick={() => undoCorrections(item.id)}
+                          className="flex items-center gap-1.5 text-xs font-medium text-amber-500 hover:text-amber-600 px-3 py-2 rounded-lg hover:bg-amber-50 transition-colors ml-auto">
                           <RotateCcw size={12}/> Undo Changes
                         </button>
                       )}
@@ -736,17 +836,16 @@ export default function RequestsPage() {
         </div>
       )}
 
-      {/* Empty state */}
       {!loading && items.length === 0 && (
         <div className="text-center py-10 text-gray-400">
           <FileText size={32} className="mx-auto mb-3 opacity-30"/>
-          <p className="text-sm">No documents yet — upload one above to get started</p>
+          <p className="text-sm">No documents yet — upload a PDF or submit an HL7 277 above</p>
         </div>
       )}
 
       {items.length > 0 && (
         <p className="text-xs text-gray-400 text-center mt-4">
-          Auto-refreshes every 10s · {processedItems.length} processed, {processingItems.length} in progress
+          Auto-refreshes every 10s · {processedItems.length} processed · {processingItems.length} in progress
         </p>
       )}
     </div>

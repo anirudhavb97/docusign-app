@@ -17,6 +17,7 @@ import * as path from "path";
 import { simpleParser } from "mailparser";
 import { runFullPipeline } from "../ai-pipeline";
 import { getAccessToken } from "../docusign/jwt-auth";
+import { parseX12_277, build277Summary } from "../hl7/x12-277-parser";
 
 const DS_BASE_URL = () => process.env.DOCUSIGN_BASE_URL || "https://demo.docusign.net/restapi";
 const DS_ACCOUNT_ID = () => process.env.DOCUSIGN_ACCOUNT_ID!;
@@ -67,7 +68,7 @@ export interface InboxItem {
   filename: string;
   receivedAt: string;
   status: "processing" | "classified" | "envelope_created" | "signed" | "error";
-  source?: "docusign" | "upload";
+  source?: "docusign" | "upload" | "hl7_277";
   classification?: {
     bucket: string;
     label: string;
@@ -75,8 +76,11 @@ export interface InboxItem {
     action: string;           // SIGNATURE_NEEDED | ALREADY_SIGNED | NO_SIGNATURE_REQUIRED | MANUAL_REVIEW
     needsSignature: boolean;
   };
-  summary?: string;           // AI-generated 2-3 sentence document summary
+  summary?: string;           // AI-generated or parsed document summary
   routingDepartment?: string; // clinical department this routes to
+  payer?: string;             // insurance payer (populated from HL7 277 or AI)
+  sender?: string;            // submitter / clearing-house (populated from HL7 277)
+  claimId?: string;           // claim reference number from HL7 277
   physicianName?: string;
   physicianEmail?: string;    // derived as firstname.lastname@hospital.com
   pipelineResult?: any;
@@ -378,6 +382,49 @@ export async function checkSignedEnvelopes(): Promise<void> {
       // Ignore — envelope might not be sent yet
     }
   }
+}
+
+/**
+ * Ingest an HL7 X12 277 EDI message.
+ * 277s have no document — they are purely structured claim-status data.
+ * We parse the EDI, extract payer/sender/claim info, and auto-classify
+ * as MEDICAL_RECORD_REQUEST / NO_SIGNATURE_REQUIRED.
+ */
+export async function processHl7277(ediContent: string): Promise<InboxItem> {
+  const id = `hl7_${randomUUID()}`;
+  const receivedAt = new Date().toISOString();
+
+  const parsed = parseX12_277(ediContent);
+  const summary = build277Summary(parsed, ediContent.length);
+
+  const filename = parsed.claimId
+    ? `277_Claim_${parsed.claimId}.edi`
+    : `277_${parsed.payer?.replace(/\s+/g, "_") || "Payer"}_${Date.now()}.edi`;
+
+  const item: InboxItem = {
+    id,
+    filename,
+    receivedAt,
+    status: "classified",
+    source: "hl7_277",
+    classification: {
+      bucket: "MEDICAL_RECORD_REQUEST",
+      label: "Claim Status (277)",
+      confidence: 98,
+      action: "NO_SIGNATURE_REQUIRED",
+      needsSignature: false,
+    },
+    summary,
+    routingDepartment: "Medical Records / Claims",
+    payer:    parsed.payer,
+    sender:   parsed.sender,
+    claimId:  parsed.claimId,
+  };
+
+  inboxItems.set(id, item);
+  persistItems();
+  console.log(`[agreement-desk] ✓ HL7 277 ingested: ${filename} | Payer: ${parsed.payer || "unknown"} | Claim: ${parsed.claimId || "unknown"}`);
+  return item;
 }
 
 /** Strips non-DocuSign fields from tab objects returned by the AI */

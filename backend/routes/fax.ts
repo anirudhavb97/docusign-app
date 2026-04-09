@@ -18,6 +18,7 @@ import {
   createDraftEnvelope,
   runPoll,
   processUploadedFile,
+  processHl7277,
   deleteInboxItem,
 } from "../services/fax-ingestion/agreement-desk";
 
@@ -217,6 +218,41 @@ faxRouter.post("/send-envelope-manual", upload.single("document"), async (req: R
     return res.json({ success: true, envelopeId, status: "created", senderViewUrl });
   } catch (err: any) {
     console.error("[send-envelope-manual]", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/fax/ingest-hl7
+ * Accept a raw HL7 X12 277 EDI message (text body or JSON { ediContent }).
+ * Parses the 277, extracts payer/sender/claim info, auto-classifies as
+ * MEDICAL_RECORD_REQUEST, and adds to the inbox — no document required.
+ */
+faxRouter.post("/ingest-hl7", async (req: Request, res: Response) => {
+  try {
+    let ediContent: string | undefined;
+
+    const contentType = req.headers["content-type"] || "";
+    if (contentType.includes("application/json")) {
+      ediContent = req.body?.ediContent;
+    } else {
+      // plain text body
+      ediContent = typeof req.body === "string" ? req.body : req.body?.toString?.();
+    }
+
+    if (!ediContent || ediContent.trim().length === 0) {
+      return res.status(400).json({ error: "No EDI content provided. Send JSON { ediContent } or plain text." });
+    }
+
+    // Basic validation — must start with ISA
+    if (!ediContent.trim().startsWith("ISA")) {
+      return res.status(400).json({ error: "Content does not appear to be a valid X12 EDI message (must start with ISA)." });
+    }
+
+    const item = await processHl7277(ediContent);
+    return res.json({ success: true, item });
+  } catch (err: any) {
+    console.error("[fax/ingest-hl7] Error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
