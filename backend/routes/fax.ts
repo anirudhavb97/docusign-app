@@ -16,6 +16,7 @@ import {
   extractPdfFromEmail,
   getInboxItems,
   createDraftEnvelope,
+  createHl7DraftEnvelope,
   runPoll,
   processUploadedFile,
   processHl7277,
@@ -68,6 +69,24 @@ faxRouter.post("/create-envelope/:id", async (req: Request, res: Response) => {
     res.json({ success: true, ...result });
   } catch (err: any) {
     console.error("[fax/create-envelope] Error:", err.message);
+    if (err.response) console.error("DS response:", err.response.status, JSON.stringify(err.response.data));
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/fax/create-hl7-envelope/:id
+ * Creates a DRAFT DocuSign envelope for an HL7 277 item using a dummy
+ * Home Health Order PDF — no pipelineResult required.
+ */
+faxRouter.post("/create-hl7-envelope/:id", async (req: Request, res: Response) => {
+  try {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const { returnUrl, patientName } = req.body || {};
+    const result = await createHl7DraftEnvelope(id, patientName, returnUrl);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    console.error("[fax/create-hl7-envelope] Error:", err.message);
     if (err.response) console.error("DS response:", err.response.status, JSON.stringify(err.response.data));
     res.status(500).json({ error: err.message });
   }

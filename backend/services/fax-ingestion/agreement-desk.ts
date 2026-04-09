@@ -408,6 +408,8 @@ export async function processHl7277(ediContent: string): Promise<InboxItem> {
     ? `277_Claim_${parsed.claimId}.edi`
     : `277_${parsed.payer?.replace(/\s+/g, "_") || "Payer"}_${Date.now()}.edi`;
 
+  const needsSig = parsed.requestType === "SIGNATURE_REQUEST";
+
   const item: InboxItem = {
     id,
     filename,
@@ -418,8 +420,8 @@ export async function processHl7277(ediContent: string): Promise<InboxItem> {
       bucket: "MEDICAL_RECORD_REQUEST",
       label: "Claim Status (277)",
       confidence: 98,
-      action: "NO_SIGNATURE_REQUIRED",
-      needsSignature: false,
+      action: needsSig ? "SIGNATURE_NEEDED" : "NO_SIGNATURE_REQUIRED",
+      needsSignature: needsSig,
     },
     summary,
     routingDepartment: "Medical Records / Claims",
@@ -427,6 +429,7 @@ export async function processHl7277(ediContent: string): Promise<InboxItem> {
     sender:         parsed.sender,
     claimId:        parsed.claimId,
     hl7RequestType: parsed.requestType,
+    patientName:    parsed.patient,
   };
 
   inboxItems.set(id, item);
@@ -552,6 +555,101 @@ export async function createDraftEnvelope(
   persistItems();
 
   console.log(`[agreement-desk] ✓ Envelope ${draftEnvelopeId} ready for ${signerEmail}`);
+  return { draftEnvelopeId, senderViewUrl };
+}
+
+// ── Dummy Home Health Order PDF (base64, valid 1-page PDF with content stream) ─
+const DUMMY_HOME_HEALTH_ORDER_B64 =
+  "JVBERi0xLjQKMSAwIG9iago8PC9UeXBlIC9DYXRhbG9nIC9QYWdlcyAyIDAgUj4+CmVuZG9iagoyIDAgb2JqCjw8L1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDE+PgplbmRvYmoKMyAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCA2MTIgNzkyXS9SZXNvdXJjZXM8PC9Gb250PDwvRjE8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9CYXNlRm9udC9IZWx2ZXRpY2E+Pj4+Pj4vQ29udGVudHMgNCAwIFI+PgplbmRvYmoKNCAwIG9iago8PC9MZW5ndGggNTY5Pj4Kc3RyZWFtCkJUCi9GMSAxNiBUZgo3MiA3MjAgVGQKKEhvbWUgSGVhbHRoIE9yZGVyKSBUagowIC0zMCBUZAovRjEgMTEgVGYKKFBhdGllbnQ6IF9fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fKSBUagowIC0yNCBUZAooT3JkZXJpbmcgUGh5c2ljaWFuOiBfX19fX19fX19fX19fX19fX19fX19fX19fX18pIFRqCjAgLTI0IFRkCihEaWFnbm9zaXM6IF9fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fXykgVGoKMCAtMjQgVGQKKERhdGUgb2YgU2VydmljZTogX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fKSBUagowIC00MCBUZAooSG9tZSBIZWFsdGggT3JkZXJzOikgVGoKMCAtMjAgVGQKKCAgLSBEYWlseSBza2lsbGVkIG51cnNpbmcgdmlzaXRzKSBUagowIC0yMCBUZAooICAtIFBoeXNpY2FsIHRoZXJhcHkgM3gvd2VlaykgVGoKMCAtMjAgVGQKKCAgLSBNZWRpY2F0aW9uIG1hbmFnZW1lbnQgYW5kIHdvdW5kIGNhcmUpIFRqCjAgLTYwIFRkCihQaHlzaWNpYW4gU2lnbmF0dXJlOiBfX19fX19fX19fX19fX19fX19fX19fX19fX19fICAgRGF0ZTogX19fX19fX19fX18pIFRqCkVUCmVuZHN0cmVhbQplbmRvYmoKeHJlZgowIDUKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTYgMDAwMDAgbiAKMDAwMDAwMDExMSAwMDAwMCBuIAowMDAwMDAwMjY0IDAwMDAwIG4gCnRyYWlsZXIKPDwvU2l6ZSA1L1Jvb3QgMSAwIFI+PgpzdGFydHhyZWYKODgyCiUlRU9G";
+
+/**
+ * Creates a DocuSign draft envelope for an HL7 277 item using a dummy
+ * Home Health Order PDF (no pipelineResult required).
+ * The physician can review and edit the tabs in the embedded sender view.
+ */
+export async function createHl7DraftEnvelope(
+  itemId: string,
+  patientName?: string,
+  returnUrl?: string,
+): Promise<{ draftEnvelopeId: string; senderViewUrl: string }> {
+  const item = inboxItems.get(itemId);
+  if (!item) throw new Error(`Item ${itemId} not found`);
+
+  const accessToken = await getAccessToken();
+
+  const docName = "Home_Health_Order.pdf";
+  const signerName  = item.physicianName  || "Ordering Physician";
+  const signerEmail = item.physicianEmail || "physician@hospital.com";
+
+  const envelopeBody = {
+    status: "created",
+    emailSubject: `Signature Required: Home Health Order${patientName ? ` — ${patientName}` : ""}`,
+    emailBlurb: "Please review and sign the attached Home Health Order.",
+    documents: [{
+      documentBase64: DUMMY_HOME_HEALTH_ORDER_B64,
+      name: docName,
+      fileExtension: "pdf",
+      documentId: "1",
+    }],
+    recipients: {
+      signers: [{
+        email: signerEmail,
+        name: signerName,
+        recipientId: "1",
+        routingOrder: "1",
+        tabs: {
+          signHereTabs: [{
+            documentId: "1",
+            pageNumber: "1",
+            xPosition: "72",
+            yPosition: "620",
+            tabLabel: "PhysicianSignature",
+          }],
+          dateSignedTabs: [{
+            documentId: "1",
+            pageNumber: "1",
+            xPosition: "380",
+            yPosition: "625",
+            tabLabel: "DateSigned",
+          }],
+        },
+      }],
+    },
+  };
+
+  let envelopeResponse: any;
+  try {
+    envelopeResponse = await axios.post(
+      `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes`,
+      envelopeBody,
+      { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
+    );
+  } catch (err: any) {
+    const dsErr = err.response?.data;
+    if (dsErr) throw new Error(dsErr.message || dsErr.errorCode || JSON.stringify(dsErr));
+    throw err;
+  }
+
+  const draftEnvelopeId = envelopeResponse.data.envelopeId;
+  const backUrl = returnUrl || process.env.FRONTEND_URL || "https://glistening-nature-production.up.railway.app";
+
+  let senderViewUrl: string;
+  try {
+    const viewResponse = await axios.post(
+      `${DS_BASE_URL()}/v2.1/accounts/${DS_ACCOUNT_ID()}/envelopes/${draftEnvelopeId}/views/sender`,
+      { returnUrl: `${backUrl}/agreements/requests` },
+      { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
+    );
+    senderViewUrl = viewResponse.data.url;
+  } catch (err: any) {
+    console.warn("[agreement-desk] HL7 sender view failed:", err.response?.data || err.message);
+    senderViewUrl = `https://apps-d.docusign.com/send/prepare/${draftEnvelopeId}`;
+  }
+
+  inboxItems.set(itemId, { ...item, status: "envelope_created", draftEnvelopeId });
+  persistItems();
+
+  console.log(`[agreement-desk] ✓ HL7 envelope ${draftEnvelopeId} created for ${signerEmail}`);
   return { draftEnvelopeId, senderViewUrl };
 }
 

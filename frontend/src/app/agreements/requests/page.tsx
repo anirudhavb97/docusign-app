@@ -261,7 +261,8 @@ const EHR_RECORDS: Record<string, Array<{ id: string; type: string; date: string
 function getActiveStep(item: InboxItem): number {
   switch (item.status) {
     case "processing":       return 1;
-    case "classified":       return item.classification?.needsSignature ? 3 : 2;
+    // "classified" means Sig. Action determination is done → show at Prepare step
+    case "classified":       return 3;
     case "envelope_created": return 4;
     case "signed":           return 5;
     default:                 return 0;
@@ -405,6 +406,19 @@ export default function RequestsPage() {
       .then(() => showToast("Response sent back to payer", "success"))
       .catch(err => showToast(err.message, "error"))
       .finally(() => setActioning(null));
+  }
+
+  function handleCreateHl7Envelope(item: InboxItem) {
+    setCreating(item.id);
+    const imported = importedItems[item.id];
+    fetch(`/api/fax?path=create-hl7-envelope/${item.id}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ returnUrl: window.location.origin, patientName: imported?.patientName }),
+    })
+      .then(r => r.json())
+      .then(d => { if (d.error) throw new Error(d.error); showToast("Envelope created — opening DocuSign…", "success"); loadItems(); if (d.senderViewUrl) window.location.href = d.senderViewUrl; })
+      .catch(e => showToast(e.message, "error"))
+      .finally(() => setCreating(null));
   }
 
   // Open EHR import modal — auto-preselect first patient and preselected records
@@ -622,6 +636,13 @@ export default function RequestsPage() {
                       <span className="text-xs text-gray-400">{item.classification.confidence}%</span>
                     </> : null}
                   </div>
+                  {/* Patient name column */}
+                  <div className="flex-1 hidden md:block min-w-0">
+                    {(() => { const pn = imported?.patientName || item.patientName; return pn
+                      ? <div className="flex items-center gap-1"><User size={11} className="text-gray-400 shrink-0"/><span className="text-xs text-gray-600 truncate">{pn}</span></div>
+                      : <span className="text-xs text-gray-300">—</span>; })()}
+                  </div>
+                  {/* Payer column */}
                   <div className="flex-1 hidden md:block min-w-0">
                     {payer ? <div className="flex items-center gap-1"><Building2 size={11} className="text-gray-400 shrink-0"/><span className="text-xs text-gray-600 truncate">{payer}</span></div>
                     : <span className="text-xs text-gray-300">—</span>}
@@ -633,8 +654,8 @@ export default function RequestsPage() {
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0 ml-1" onClick={e => e.stopPropagation()}>
                     <ItemActions item={item} imported={imported} reqType={reqType} creating={creating} actioning={actioning}
-                      onEnvelope={() => handleCreateEnvelope(item)} onEhr={e => openEhrModal(item, e)}
-                      onPayer={() => handleSendToPayer(item.id)} compact/>
+                      onEnvelope={() => handleCreateEnvelope(item)} onHl7Envelope={() => handleCreateHl7Envelope(item)}
+                      onEhr={e => openEhrModal(item, e)} onPayer={() => handleSendToPayer(item.id)} compact/>
                     <button onClick={e => handleDelete(item.id, e)} disabled={deleting === item.id}
                       className="p-1.5 text-gray-300 hover:text-red-400 hover:bg-red-50 rounded-lg transition-colors">
                       {deleting === item.id ? <Loader2 size={12} className="animate-spin"/> : <Trash2 size={12}/>}
@@ -723,8 +744,8 @@ export default function RequestsPage() {
                     {/* Actions */}
                     <div className="flex items-center gap-2 pt-3 border-t border-gray-200">
                       <ItemActions item={item} imported={imported} reqType={reqType} creating={creating} actioning={actioning}
-                        onEnvelope={() => handleCreateEnvelope(item)} onEhr={() => openEhrModal(item)}
-                        onPayer={() => handleSendToPayer(item.id)} compact={false}/>
+                        onEnvelope={() => handleCreateEnvelope(item)} onHl7Envelope={() => handleCreateHl7Envelope(item)}
+                        onEhr={() => openEhrModal(item)} onPayer={() => handleSendToPayer(item.id)} compact={false}/>
                       {item.status === "signed" && (
                         <button onClick={() => handleSendToPayer(item.id)} disabled={actioning === item.id}
                           className="flex items-center gap-1.5 bg-blue-600 text-white text-sm font-semibold px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-60 transition-colors">
@@ -829,22 +850,26 @@ function EditableField({ id, field, value, placeholder, editingField, setEditing
   );
 }
 
-function ItemActions({ item, imported, reqType, creating, actioning, onEnvelope, onEhr, onPayer, compact }: {
+function ItemActions({ item, imported, reqType, creating, actioning, onEnvelope, onHl7Envelope, onEhr, onPayer, compact }: {
   item: InboxItem; imported?: EhrImport; reqType: string;
   creating: string | null; actioning: string | null;
-  onEnvelope: () => void; onEhr: (e?: React.MouseEvent) => void;
+  onEnvelope: () => void; onHl7Envelope: () => void;
+  onEhr: (e?: React.MouseEvent) => void;
   onPayer: () => void; compact: boolean;
 }) {
   const cls = compact
     ? "flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60"
     : "flex items-center gap-1.5 text-sm font-semibold px-4 py-2 rounded-lg transition-colors disabled:opacity-60";
   const iconSz = compact ? 11 : 13;
+  const isHl7 = item.source === "hl7_277";
 
   // After EHR import
   if (imported) {
     if (imported.needsSignature) {
+      // HL7 items use the dummy home health order envelope; PDF items use the pipeline envelope
+      const handler = isHl7 ? onHl7Envelope : onEnvelope;
       return (
-        <button onClick={onEnvelope} disabled={creating === item.id} className={`${cls} bg-[#26154a] text-white hover:bg-[#3a2060]`}>
+        <button onClick={handler} disabled={creating === item.id} className={`${cls} bg-[#26154a] text-white hover:bg-[#3a2060]`}>
           {creating === item.id ? <><Loader2 size={iconSz} className="animate-spin"/> Sending…</> : <><Send size={iconSz}/> {compact ? "Physician Workspace" : "Send to Physician Workspace"}</>}
         </button>
       );
@@ -856,7 +881,6 @@ function ItemActions({ item, imported, reqType, creating, actioning, onEnvelope,
     );
   }
 
-  const isHl7 = item.source === "hl7_277";
   const needsSig = item.classification?.needsSignature;
 
   // HL7 items always show Import from EHR until imported
