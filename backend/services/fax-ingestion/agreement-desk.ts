@@ -81,6 +81,7 @@ export interface InboxItem {
   payer?: string;             // insurance payer (populated from HL7 277 or AI)
   sender?: string;            // submitter / clearing-house (populated from HL7 277)
   claimId?: string;           // claim reference number from HL7 277
+  patientName?: string;       // patient name extracted from AI pipeline
   physicianName?: string;
   physicianEmail?: string;    // derived as firstname.lastname@hospital.com
   pipelineResult?: any;
@@ -223,6 +224,7 @@ async function processEnvelope(envelopeId: string, emailSubject: string, receive
     const ing = pipeline.ingestion;
     const physicianName = ing?.provider?.ordering_physician_name ?? undefined;
     const physicianEmail = derivePhysicianEmail(physicianName);
+    const patientName = ing?.patient?.name ?? pipeline.envelopePrep?.patient_name ?? undefined;
 
     const needsSignature = cls?.action === "SIGNATURE_NEEDED";
     const bucket = cls?.bucket || "UNKNOWN";
@@ -241,6 +243,7 @@ async function processEnvelope(envelopeId: string, emailSubject: string, receive
       },
       summary: cls?.summary ?? undefined,
       routingDepartment: cls?.routing_department ?? undefined,
+      patientName: patientName ?? undefined,
       physicianName: physicianName ?? undefined,
       physicianEmail: physicianEmail ?? undefined,
       pipelineResult: pipeline,
@@ -277,8 +280,10 @@ export async function processUploadedFile(pdfBase64: string, filename: string): 
       console.log(`[agreement-desk] Running AI pipeline on uploaded file: ${filename}`);
       const pipeline = await runFullPipeline(pdfBase64, filename);
       const cls = pipeline.classification?.classification;
-      const physicianName = pipeline.ingestion?.provider?.ordering_physician_name ?? undefined;
+      const ing = pipeline.ingestion;
+      const physicianName = ing?.provider?.ordering_physician_name ?? undefined;
       const physicianEmail = derivePhysicianEmail(physicianName);
+      const patientName = ing?.patient?.name ?? pipeline.envelopePrep?.patient_name ?? undefined;
       const needsSignature = cls?.action === "SIGNATURE_NEEDED";
       const bucket = cls?.bucket || "UNKNOWN";
 
@@ -296,6 +301,7 @@ export async function processUploadedFile(pdfBase64: string, filename: string): 
         },
         summary: cls?.summary ?? undefined,
         routingDepartment: cls?.routing_department ?? undefined,
+        patientName: patientName ?? undefined,
         physicianName,
         physicianEmail,
         pipelineResult: pipeline,

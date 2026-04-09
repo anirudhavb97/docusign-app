@@ -25,6 +25,7 @@ interface InboxItem {
   payer?: string;
   sender?: string;
   claimId?: string;
+  patientName?: string;
   physicianName?: string;
   physicianEmail?: string;
   draftEnvelopeId?: string;
@@ -493,7 +494,7 @@ export default function RequestsPage() {
                           }`}>
                             {done ? <CheckCircle size={14}/> : active ? <Loader2 size={11} className="animate-spin"/> : idx + 1}
                           </div>
-                          <span className={`text-[10px] mt-1 font-medium whitespace-nowrap ${done || active ? "text-[#26154a]" : "text-gray-300"}`}>{step}</span>
+                          <span className={`text-[11px] mt-1 font-medium whitespace-nowrap ${done || active ? "text-[#26154a]" : "text-gray-300"}`}>{step}</span>
                         </div>
                         {idx < STEPS.length - 1 && <div className={`h-0.5 flex-1 mx-1 mb-4 rounded-full ${done ? "bg-[#26154a]" : "bg-gray-200"}`}/>}
                       </div>
@@ -615,13 +616,13 @@ export default function RequestsPage() {
                     {item.status === "classified" && needsSig && (
                       <button onClick={() => handleCreateEnvelope(item)} disabled={creating === item.id}
                         className="flex items-center gap-1 bg-[#26154a] text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-[#3a2060] disabled:opacity-60 transition-colors">
-                        {creating === item.id ? <><Loader2 size={11} className="animate-spin"/> Creating…</> : <><Send size={11}/> Envelope</>}
+                        {creating === item.id ? <><Loader2 size={11} className="animate-spin"/> Sending…</> : <><Send size={11}/> Physician Workspace</>}
                       </button>
                     )}
                     {item.status === "classified" && !needsSig && (
                       <button onClick={e => handleSendToEhr(item.id, e)} disabled={actioning === item.id}
                         className="flex items-center gap-1 bg-teal-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-teal-700 disabled:opacity-60 transition-colors">
-                        {actioning === item.id ? <><Loader2 size={11} className="animate-spin"/> Sending…</> : <><Database size={11}/> EHR</>}
+                        {actioning === item.id ? <><Loader2 size={11} className="animate-spin"/> Importing…</> : <><Database size={11}/> Import EHR</>}
                       </button>
                     )}
                     {item.status === "envelope_created" && item.draftEnvelopeId && (
@@ -663,7 +664,7 @@ export default function RequestsPage() {
                               }`}>
                                 {done ? <CheckCircle size={12}/> : i + 1}
                               </div>
-                              <span className={`text-[10px] mt-1 font-medium whitespace-nowrap ${done || active ? "text-[#26154a]" : "text-gray-300"}`}>{step}</span>
+                              <span className={`text-[11px] mt-1 font-medium whitespace-nowrap ${done || active ? "text-[#26154a]" : "text-gray-300"}`}>{step}</span>
                             </div>
                             {i < STEPS.length - 1 && <div className={`h-0.5 flex-1 mx-1 mb-4 rounded-full ${done ? "bg-[#26154a]" : "bg-gray-200"}`}/>}
                           </div>
@@ -674,10 +675,10 @@ export default function RequestsPage() {
                     {/* AI Summary */}
                     {item.summary && (
                       <div className="bg-white border border-purple-100 rounded-xl px-4 py-3 mb-4">
-                        <p className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider mb-1">
+                        <p className="text-xs font-semibold text-purple-400 uppercase tracking-wider mb-1">
                           {isHl7 ? "HL7 Decoded Summary" : "AI Summary"}
                         </p>
-                        <p className="text-sm text-gray-600 leading-relaxed">{item.summary}</p>
+                        <p className="text-sm text-gray-700 leading-relaxed">{item.summary}</p>
                         {item.claimId && (
                           <p className="text-xs text-gray-400 mt-1.5 font-mono">Claim # {item.claimId}</p>
                         )}
@@ -689,7 +690,7 @@ export default function RequestsPage() {
 
                       {/* Classification */}
                       <div>
-                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Classification</label>
+                        <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider block mb-1">Classification</label>
                         <div className="relative">
                           <select
                             value={bucket}
@@ -707,7 +708,7 @@ export default function RequestsPage() {
 
                       {/* Department */}
                       <div>
-                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Route to Department</label>
+                        <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider block mb-1">Route to Department</label>
                         {editingField?.id === item.id && editingField?.field === "routingDepartment" ? (
                           <input autoFocus type="text" defaultValue={department}
                             onBlur={e => { applyCorrection(item.id, "routingDepartment", e.target.value); setEditingField(null); }}
@@ -724,7 +725,7 @@ export default function RequestsPage() {
 
                       {/* Payer */}
                       <div>
-                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Payer</label>
+                        <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider block mb-1">Payer</label>
                         {editingField?.id === item.id && editingField?.field === "payer" ? (
                           <input autoFocus type="text" defaultValue={payer}
                             onBlur={e => { applyCorrection(item.id, "payer", e.target.value); setEditingField(null); }}
@@ -741,7 +742,7 @@ export default function RequestsPage() {
 
                       {/* Sender */}
                       <div>
-                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Sender / Submitter</label>
+                        <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider block mb-1">Sender / Submitter</label>
                         {editingField?.id === item.id && editingField?.field === "sender" ? (
                           <input autoFocus type="text" defaultValue={sender}
                             onBlur={e => { applyCorrection(item.id, "sender", e.target.value); setEditingField(null); }}
@@ -756,10 +757,20 @@ export default function RequestsPage() {
                         )}
                       </div>
 
+                      {/* Patient name */}
+                      {!isHl7 && (
+                        <div>
+                          <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider block mb-1">Patient</label>
+                          <p className="text-sm text-gray-700 px-2 py-1.5 rounded-lg border border-gray-100 bg-white">
+                            {item.patientName || <span className="text-gray-400 italic">Unknown patient</span>}
+                          </p>
+                        </div>
+                      )}
+
                       {/* Physician (only for non-HL7) */}
                       {!isHl7 && (
                         <div>
-                          <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Ordering Physician</label>
+                          <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider block mb-1">Ordering Physician</label>
                           {editingField?.id === item.id && editingField?.field === "physicianName" ? (
                             <input autoFocus type="text" defaultValue={physician}
                               onBlur={e => {
@@ -782,7 +793,7 @@ export default function RequestsPage() {
 
                       {/* Signature status */}
                       <div>
-                        <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider block mb-1">Signature</label>
+                        <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider block mb-1">Signature</label>
                         <div className="flex items-center gap-1.5 text-xs px-2 py-1.5">
                           {item.status === "signed" ? (
                             <><CheckCircle size={13} className="text-green-500"/><span className="text-green-600 font-medium">Signed</span></>
@@ -799,14 +810,14 @@ export default function RequestsPage() {
                     <div className="flex items-center gap-2 pt-3 border-t border-gray-200">
                       {item.status === "classified" && needsSig && (
                         <button onClick={() => handleCreateEnvelope(item)} disabled={creating === item.id}
-                          className="flex items-center gap-1.5 bg-[#26154a] text-white text-xs font-semibold px-4 py-2 rounded-lg hover:bg-[#3a2060] disabled:opacity-60 transition-colors">
-                          {creating === item.id ? <><Loader2 size={12} className="animate-spin"/> Creating…</> : <><Send size={12}/> Create Envelope</>}
+                          className="flex items-center gap-1.5 bg-[#26154a] text-white text-sm font-semibold px-4 py-2 rounded-lg hover:bg-[#3a2060] disabled:opacity-60 transition-colors">
+                          {creating === item.id ? <><Loader2 size={13} className="animate-spin"/> Sending…</> : <><Send size={13}/> Send to Physician Workspace</>}
                         </button>
                       )}
                       {item.status === "classified" && !needsSig && (
                         <button onClick={() => handleSendToEhr(item.id)} disabled={actioning === item.id}
-                          className="flex items-center gap-1.5 bg-teal-600 text-white text-xs font-semibold px-4 py-2 rounded-lg hover:bg-teal-700 disabled:opacity-60 transition-colors">
-                          {actioning === item.id ? <><Loader2 size={12} className="animate-spin"/> Sending…</> : <><Database size={12}/> Send to EHR</>}
+                          className="flex items-center gap-1.5 bg-teal-600 text-white text-sm font-semibold px-4 py-2 rounded-lg hover:bg-teal-700 disabled:opacity-60 transition-colors">
+                          {actioning === item.id ? <><Loader2 size={13} className="animate-spin"/> Importing…</> : <><Database size={13}/> Import from EHR</>}
                         </button>
                       )}
                       {item.status === "envelope_created" && item.draftEnvelopeId && (
