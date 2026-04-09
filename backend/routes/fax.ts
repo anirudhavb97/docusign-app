@@ -59,8 +59,11 @@ faxRouter.post("/poll-now", async (_req: Request, res: Response) => {
 faxRouter.post("/create-envelope/:id", async (req: Request, res: Response) => {
   try {
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const returnUrl = req.body?.returnUrl as string | undefined;
-    const result = await createDraftEnvelope(id, returnUrl);
+    const { returnUrl, physicianName, physicianEmail, routingDepartment } = req.body || {};
+    const overrides = (physicianName || physicianEmail || routingDepartment)
+      ? { physicianName, physicianEmail, routingDepartment }
+      : undefined;
+    const result = await createDraftEnvelope(id, returnUrl, overrides);
     res.json({ success: true, ...result });
   } catch (err: any) {
     console.error("[fax/create-envelope] Error:", err.message);

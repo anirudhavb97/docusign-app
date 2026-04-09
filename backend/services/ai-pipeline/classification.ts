@@ -29,6 +29,8 @@ export interface ClassificationResult {
     physician_signature_present: boolean;
     initials_present: boolean;
     action: ActionType;
+    summary: string;
+    routing_department: string;
   };
   bucket_specific_fields: Record<string, any>;
   secondary_classification: string | null;
@@ -82,7 +84,9 @@ Return ONLY valid JSON:
     "requires_physician_signature": <boolean>,
     "physician_signature_present": <boolean>,
     "initials_present": <boolean>,
-    "action": "<SIGNATURE_NEEDED|ALREADY_SIGNED|NO_SIGNATURE_REQUIRED|MANUAL_REVIEW>"
+    "action": "<SIGNATURE_NEEDED|ALREADY_SIGNED|NO_SIGNATURE_REQUIRED|MANUAL_REVIEW>",
+    "summary": "<2-3 sentence plain-English description: who sent it, what it contains, what action is needed>",
+    "routing_department": "<clinical department this should route to, e.g. Home Health, Cardiology, Oncology, Radiology, Neurology, DME / Equipment, Medical Records, Compliance, Primary Care, Rehabilitation>"
   },
   "bucket_specific_fields": {
     <include only the fields relevant to the classified bucket>

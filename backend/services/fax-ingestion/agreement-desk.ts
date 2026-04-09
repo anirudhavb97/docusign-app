@@ -75,6 +75,8 @@ export interface InboxItem {
     action: string;           // SIGNATURE_NEEDED | ALREADY_SIGNED | NO_SIGNATURE_REQUIRED | MANUAL_REVIEW
     needsSignature: boolean;
   };
+  summary?: string;           // AI-generated 2-3 sentence document summary
+  routingDepartment?: string; // clinical department this routes to
   physicianName?: string;
   physicianEmail?: string;    // derived as firstname.lastname@hospital.com
   pipelineResult?: any;
@@ -233,6 +235,8 @@ async function processEnvelope(envelopeId: string, emailSubject: string, receive
         action: cls?.action || "MANUAL_REVIEW",
         needsSignature,
       },
+      summary: cls?.summary ?? undefined,
+      routingDepartment: cls?.routing_department ?? undefined,
       physicianName: physicianName ?? undefined,
       physicianEmail: physicianEmail ?? undefined,
       pipelineResult: pipeline,
@@ -286,6 +290,8 @@ export async function processUploadedFile(pdfBase64: string, filename: string): 
           action: cls?.action || "MANUAL_REVIEW",
           needsSignature,
         },
+        summary: cls?.summary ?? undefined,
+        routingDepartment: cls?.routing_department ?? undefined,
         physicianName,
         physicianEmail,
         pipelineResult: pipeline,
@@ -387,6 +393,7 @@ function cleanTab(tab: any): any {
 export async function createDraftEnvelope(
   itemId: string,
   returnUrl?: string,
+  overrides?: { physicianName?: string; physicianEmail?: string; routingDepartment?: string },
 ): Promise<{ draftEnvelopeId: string; senderViewUrl: string }> {
   const item = inboxItems.get(itemId);
   if (!item) throw new Error(`Item ${itemId} not found`);
@@ -404,9 +411,9 @@ export async function createDraftEnvelope(
     : await downloadDocumentAsBase64(itemId);
   if (!pdfB64) throw new Error("Could not retrieve PDF");
 
-  // Signer info
-  const signerEmail = item.physicianEmail || "physician@hospital.com";
-  const signerName  = item.physicianName  || "Ordering Physician";
+  // Signer info — use user-corrected values if provided, otherwise fall back to AI-extracted
+  const signerEmail = overrides?.physicianEmail || item.physicianEmail || "physician@hospital.com";
+  const signerName  = overrides?.physicianName  || item.physicianName  || "Ordering Physician";
 
   // ── Tab placement ─────────────────────────────────────────────────────────
   // Tabs come entirely from the envelope-prep vision pipeline, which uses
